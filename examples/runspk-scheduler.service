@@ -1,0 +1,17 @@
+[Unit]
+Description=runspk control plane
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/runspk/scheduler.env
+ExecStartPre=/usr/bin/mkdir -p %h/.local/state/runspk
+ExecStart=%h/.local/bin/runspk-scheduler --db %h/.local/state/runspk/scheduler.sqlite
+Restart=on-failure
+RestartSec=2
+UMask=0077
+NoNewPrivileges=true
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target

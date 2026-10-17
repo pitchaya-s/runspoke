@@ -1,0 +1,14 @@
+/target/
+/.tools/
+/.runspk/
+*.sqlite*
+__pycache__/
+/.venv/
+/dist/
+# Local benchmark output and reports.
+/bench/results/
+/docs/product/
+/.env
+/.env.*
+/worker-connection*.json
+/runspk-invitation*.json

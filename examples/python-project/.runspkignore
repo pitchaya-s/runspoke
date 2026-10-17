@@ -1,0 +1,2 @@
+# Literal relative paths; directories also exclude all descendants.
+results

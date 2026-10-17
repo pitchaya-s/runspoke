@@ -1,0 +1,19 @@
+[Unit]
+Description=runspk trusted worker using an imported connection profile
+After=network.target runspk-tunnel.service
+Wants=runspk-tunnel.service
+
+[Service]
+Type=simple
+# Edit the worker ID and budgets before enabling. Preserve the ID and state directory.
+ExecStart=%h/.local/bin/runspk-worker --config %h/.config/runspk/config.json --id workstation --cpu 2 --mem-mib 2048 --allow-native
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+TimeoutStopSec=15
+# Retain journaled groups for recovery after a hard worker crash.
+KillMode=process
+
+[Install]
+WantedBy=default.target

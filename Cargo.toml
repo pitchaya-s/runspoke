@@ -1,0 +1,14 @@
+[workspace]
+members = ["crates/runspk"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0-beta.1"
+edition = "2024"
+license = "MIT"
+
+[profile.dev]
+debug = 0
+
+[profile.release]
+strip = true

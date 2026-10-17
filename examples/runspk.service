@@ -1,0 +1,15 @@
+[Unit]
+Description=runspk - Your machines. One compute queue.
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/runspk start --cpu 1 --mem 256M
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target

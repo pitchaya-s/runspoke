@@ -1,0 +1,18 @@
+[Unit]
+Description=runspk worker
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/runspk/worker.env
+ExecStart=%h/.local/bin/runspk-worker --data-dir %h/.local/state/runspk/workers
+Restart=on-failure
+RestartSec=2
+UMask=0077
+NoNewPrivileges=true
+TimeoutStopSec=15
+# Preserve cooperating native job groups for journal recovery after a hard worker crash.
+KillMode=process
+
+[Install]
+WantedBy=default.target

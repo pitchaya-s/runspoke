@@ -1,0 +1,9 @@
+{
+  "project": ".",
+  "command": ["python3", "experiment.py"],
+  "resources": {"cpu": 1, "mem_mib": 128},
+  "timeout_secs": 30,
+  "trusted": true,
+  "outputs": ["results"],
+  "exclude": ["results"]
+}
