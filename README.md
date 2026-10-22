@@ -8,13 +8,13 @@ Start with one Linux computer. Add workers when you need more capacity. Runspoke
 
 ## Install
 
-If you have Rust 1.85 or newer, install the published beta from [crates.io](https://crates.io/crates/runspk):
+With a recent Rust toolchain, install the published beta from [crates.io](https://crates.io/crates/runspk):
 
 ```bash
 cargo install runspk --version 0.1.0-beta.1
 ```
 
-The explicit version selects this prerelease; Cargo skips prereleases unless you request one. Rust 1.85 is the minimum for the 2024 edition used by Runspoke.
+The explicit version selects the published beta.1; Cargo skips prereleases unless you request one. This checkout prepares **0.1.0-beta.2**, including the monitor and configuration additions described below. Build it with `cargo install --locked --path crates/runspk --bins` using Rust 1.89 or newer. See the [changelog](CHANGELOG.md) for changes and upgrade notes.
 
 For Linux users without Rust, the prebuilt x86_64 archive includes all companion binaries. Download the archive and matching checksum from [GitHub Releases](https://github.com/pitchaya-s/runspoke/releases), then verify and install it:
 
@@ -65,6 +65,10 @@ cat fetched/results/summary.txt
 
 `submit` prints a durable job ID. You can disconnect after submission; the scheduler and worker keep running. `wait --timeout 60` limits how long the client waits, while `--timeout 60` on submission limits the job's wall time. Fetch writes into a new directory and will not overwrite existing files.
 
+Use `runspk monitor` for an interactive job/worker view, live logs, queue explanations, filtering, and confirmed cancellation. See [monitoring](docs/MONITORING.md) for keys and reconnect behavior.
+
+![Runspoke terminal monitor showing a local demo cluster with running, queued, completed, and failed jobs](examples/runspoke-monitor.png)
+
 Use `runspk list`, `runspk queue`, `runspk workers`, `runspk explain JOB_ID`, and `runspk attempts JOB_ID` to inspect the queue and diagnose work. `runspk doctor --json` gives machine-readable diagnostics. Piped inspection output is JSON; `--json` and `--human` choose the format explicitly. Shell completions are printed by `runspk completions bash` (also supports zsh, fish, elvish, and PowerShell).
 
 ## Add another machine
@@ -75,7 +79,11 @@ Invitations contain the administrative token. They grant administrative access a
 
 ## Inputs, environments, and results
 
-Small project snapshots transfer source files to a worker. Each input or output bundle is limited to 32 MiB and 2,048 regular files; `.runspkignore` and `--exclude` let you leave out local files. `--dry-run` previews what would be sent. Inputs are immutable for an attempt, and declared outputs are captured after execution stops.
+Small project snapshots transfer source files to a worker. Input and output bundles default to 32 MiB and 2,048 regular files, with configurable bounded limits; `.runspkignore` and `--exclude` let you leave out local files. `--dry-run` previews what would be sent. Inputs are immutable for an attempt, and declared outputs are captured after execution stops.
+
+Inspect limits with `runspk config --remote`; [configuration](docs/CONFIGURATION.md) explains shared settings, CLI/environment precedence, timeouts, and mixed-version behavior.
+
+Jobs support `--name NAME`, repeatable `--tag TAG` and hard worker requirements such as `--require dataset=v1`. Advertise those capabilities with `runspk start --label dataset=v1` or `runspk-worker --label dataset=v1`. Use `list --search TEXT --tag TAG`, `fetch JOB_ID --list`, selective `fetch JOB_ID --path results/summary.json --into new-results`, and `repeat JOB_ID --key NEW_KEY` to reuse a completed job’s immutable inputs. `runspk storage` reports retained blobs/logs and database allocation.
 
 Large datasets and installed dependencies are not copied automatically. Put datasets at an agreed path on the worker, or use an existing container image for dependencies and large inputs. The [workspace guide](https://github.com/pitchaya-s/runspoke/blob/main/docs/WORKSPACES.md) and [large-project guide](https://github.com/pitchaya-s/runspoke/blob/main/docs/LARGE-PROJECTS.md) explain both workflows. Failed jobs can still have diagnostic logs and outputs to fetch.
 

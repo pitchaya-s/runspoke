@@ -62,3 +62,24 @@ SIGINT and SIGTERM stop dispatch, cancel active work, clean execution resources,
 `runspk stats`, `workers`, `queue`, `status`, `attempts`, `explain`, and stderr tracing provide basic monitoring. Set RUST_LOG=info for submitted/start/stopped events carrying job, attempt and worker IDs, or debug for request latency, state writes and lease/poll failures. Stats include process-lifetime planning, dispatch, retry and database operation counters; database timing separates operation time from mutex waiting. Protect state files and logs as secrets. Use `list --limit 100 --after SEQ` and indexed state/worker filters for large histories. Explicit bounded pruning can remove old unkeyed terminal job/log records; completion receipts and keyed records remain.
 
 Run `runspk backup --db /path/state.sqlite --out /path/new-backup.sqlite` on the scheduler host for an online snapshot. It uses a separate SQLite read connection and does not acquire the scheduler Store mutex. The destination must be new, is mode 0600, and must not be used until the command succeeds. Failure attempts to remove the copy; a crash may leave an incomplete destination that needs manual removal. Backup retries are bounded to 30 seconds between SQLite steps; an underlying stalled filesystem can still block a step. Preserve worker journals independently. On upgrade, stop workers gracefully, back up state, replace all binaries, then restart with the same paths and token. Incompatible database formats are refused without changing their contents. There is no downgrade compatibility promise. If a worker directory or machine is lost, follow [external fencing and explicit resolution](FAILURE-MODEL.md).
+
+## Preferences, monitoring and storage
+
+See [CONFIGURATION](CONFIGURATION.md) for non-secret settings shared by the CLI,
+scheduler and workers, named private profile paths, precedence and bounded
+transfer negotiation. See [MONITORING](MONITORING.md) for the interactive monitor,
+byte-cursor logs and measurement semantics. `runspk storage` reports database/WAL
+allocation, reusable pages, snapshot/artifact encoded bytes, retained UTF-8 logs
+and immutable execution receipts. Pruning makes database pages reusable; it does
+not shrink the file or expire receipts. Automatic retention remains disabled.
+`backup` without `--db` now follows the selected private profile's state directory;
+explicit paths remain supported. Restore only to a new database path and preserve
+worker journals; a database backup does not contain live worker process identity.
+
+The schema remains version 1: new optional wire/specification fields use serde
+defaults and persist inside existing JSON records. No tables are rebuilt. Retain
+the original worker transfer settings until active and uncertain executions have
+reconciled. Upgrade the scheduler before enabling new label/name/tag features;
+new clients refuse these operations when capability discovery says they would be
+ignored. Replace all companion binaries together and keep the same token/state
+paths. New source builds require Rust 1.89 or newer; runtime packages need no Rust.

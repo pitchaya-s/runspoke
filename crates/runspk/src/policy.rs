@@ -40,7 +40,16 @@ pub fn available(w: &Worker, jobs: &[Job]) -> Resources {
 }
 fn compatible(w: &Worker, j: &Job) -> bool {
     w.state == WorkerState::Online
+        && j.spec
+            .required_labels
+            .iter()
+            .all(|(key, value)| w.registration.labels.get(key) == Some(value))
         && (j.spec.workspace_id.is_none() || w.registration.project_staging)
+        && (j.spec.workspace_id.is_none()
+            || w.registration
+                .transfer_limits
+                .unwrap_or_default()
+                .supports(&j.spec.transfer_limits.unwrap_or_default()))
         && if j.spec.image.is_some() {
             w.registration.runtime.is_some()
         } else {
@@ -228,6 +237,10 @@ mod tests {
             id: seq.to_string(),
             seq,
             spec: JobSpec {
+                name: None,
+                tags: Vec::new(),
+                required_labels: Default::default(),
+                transfer_limits: None,
                 command: vec!["true".into()],
                 resources: Resources { cpu, mem_mib: mem },
                 timeout_secs: timeout,
@@ -259,6 +272,8 @@ mod tests {
     }
     fn worker(id: &str, cpu: u32, mem: u64) -> Worker {
         Worker {
+            telemetry: None,
+            telemetry_received_ms: None,
             registration: Registration {
                 auth: WorkerAuth {
                     id: id.into(),
@@ -270,6 +285,8 @@ mod tests {
                 runtime: None,
                 gpus: Vec::new(),
                 project_staging: true,
+                labels: Default::default(),
+                transfer_limits: None,
             },
             state: WorkerState::Online,
             last_seen_ms: 0,

@@ -33,6 +33,18 @@ impl Store {
             sql.push_str(" AND worker_id=?");
             values.push(Value::Text(worker.clone()));
         }
+        if let Some(search) = &filter.search {
+            ensure!(search.len() <= 256, "search must be at most 256 bytes");
+            sql.push_str(" AND (instr(lower(id),lower(?))>0 OR instr(lower(coalesce(json_extract(data,'$.spec.name'),'')),lower(?))>0 OR instr(lower(json_extract(data,'$.spec.command')),lower(?))>0)");
+            for _ in 0..3 {
+                values.push(Value::Text(search.clone()));
+            }
+        }
+        if let Some(tag) = &filter.tag {
+            ensure!(tag.len() <= 64, "tag filter must be at most 64 bytes");
+            sql.push_str(" AND EXISTS(SELECT 1 FROM json_each(json_extract(jobs.data,'$.spec.tags')) WHERE value=?)");
+            values.push(Value::Text(tag.clone()));
+        }
         sql.push_str(" ORDER BY seq LIMIT ?");
         values.push(Value::Integer(filter.limit.map_or(-1, i64::from)));
         let mut stmt = self.conn.prepare(&sql)?;
@@ -40,6 +52,36 @@ impl Store {
             r.get::<_, String>(0)
         })?;
         rows.map(|r| Ok(serde_json::from_str(&r?)?)).collect()
+    }
+
+    pub fn storage_usage(&self) -> Result<serde_json::Value> {
+        let page_size: i64 = self.conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+        let pages: i64 = self.conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+        let free: i64 = self
+            .conn
+            .query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
+        let (snapshots, snapshot_bytes): (i64, i64) = self.conn.query_row(
+            "SELECT count(*),coalesce(sum(length(data)),0) FROM workspaces",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let (artifacts, artifact_bytes): (i64, i64) = self.conn.query_row(
+            "SELECT count(*),coalesce(sum(length(data)),0) FROM artifacts",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let log_bytes:i64=self.conn.query_row("SELECT coalesce(sum(length(CAST(stdout AS BLOB))+length(CAST(stderr AS BLOB))),0) FROM attempts",[],|r|r.get(0))?;
+        let receipts: i64 = self
+            .conn
+            .query_row("SELECT count(*) FROM executions", [], |r| r.get(0))?;
+        let wal_bytes = self
+            .conn
+            .path()
+            .and_then(|p| std::fs::metadata(format!("{p}-wal")).ok())
+            .map_or(0, |m| m.len());
+        Ok(
+            serde_json::json!({"database_bytes":pages*page_size,"wal_bytes":wal_bytes,"reusable_database_bytes":free*page_size,"snapshots":snapshots,"snapshot_encoded_bytes":snapshot_bytes,"artifact_bundles":artifacts,"artifact_encoded_bytes":artifact_bytes,"retained_log_utf8_bytes":log_bytes,"execution_receipts":receipts,"cleanup":"explicit prune only; keyed jobs and execution receipts are retained; freed pages are reused without shrinking the database"}),
+        )
     }
 
     pub fn prune(&mut self, request: &PruneRequest) -> Result<usize> {
@@ -85,6 +127,15 @@ impl Store {
     /// This is a feasibility explanation, not a promise about a future policy decision.
     pub fn explain(&self, id: &str) -> Result<serde_json::Value> {
         let job = self.get(id)?;
+        let queue_position = if job.state == JobState::Queued {
+            Some(self.conn.query_row(
+                "SELECT count(*)+1 FROM jobs WHERE state='queued' AND seq<?1",
+                [job.seq],
+                |r| r.get::<_, i64>(0),
+            )?)
+        } else {
+            None
+        };
         let active = self.reservations()?;
         let workers: Vec<_> = self.workers()?.into_iter().map(|worker| {
             let free = policy::available(&worker, &active);
@@ -92,6 +143,10 @@ impl Store {
                 "worker is offline or draining"
             } else if job.spec.workspace_id.is_some() && !worker.registration.project_staging {
                 "worker needs an upgrade for project staging"
+            } else if job.spec.required_labels.iter().any(|(key,value)|worker.registration.labels.get(key)!=Some(value)) {
+                "required worker labels do not match"
+            } else if job.spec.workspace_id.is_some() && !worker.registration.transfer_limits.unwrap_or_default().supports(&job.spec.transfer_limits.unwrap_or_default()) {
+                "worker transfer limits are too small; upgrade worker settings"
             } else if (job.spec.image.is_some() && worker.registration.runtime.is_none())
                 || (job.spec.image.is_none() && !worker.registration.allow_native)
             {
@@ -110,7 +165,7 @@ impl Store {
             serde_json::json!({"worker_id":worker.registration.auth.id,"state":worker.state,"available":free,"reason":reason})
         }).collect();
         Ok(
-            serde_json::json!({"job_id":job.id,"state":job.state,"policy":self.policy,"retry_at_ms":job.retry_at_ms,"retry_delayed":job.retry_at_ms>now_ms(),"workers":workers}),
+            serde_json::json!({"job_id":job.id,"state":job.state,"policy":self.policy,"retry_at_ms":job.retry_at_ms,"retry_delayed":job.retry_at_ms>now_ms(),"required_labels":job.spec.required_labels,"transfer_limits":job.spec.transfer_limits,"queue_position":queue_position,"queue_position_note":"submission order; priority aging and backfill can change dispatch order","workers":workers}),
         )
     }
 }

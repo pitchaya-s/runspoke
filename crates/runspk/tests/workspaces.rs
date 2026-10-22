@@ -114,6 +114,8 @@ async fn transfer_routes_accept_bundles_larger_than_the_old_http_limit() {
         .await
         .unwrap();
     let registration = Registration {
+        labels: Default::default(),
+        transfer_limits: None,
         auth: WorkerAuth {
             id: "large-transfer-worker".into(),
             session: uuid::Uuid::new_v4().to_string(),
@@ -205,6 +207,8 @@ async fn project_execution_and_outputs_cross_separate_directories() {
     let journal = Arc::new(Journal::open(&dir.path().join("worker"), "test").unwrap());
     let mut store = Store::open(dir.path().join("state.sqlite")).unwrap();
     let registration = Registration {
+        labels: Default::default(),
+        transfer_limits: None,
         auth: journal.auth.clone(),
         capacity: Resources {
             cpu: 1,

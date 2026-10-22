@@ -4,6 +4,11 @@ use runspk::{client::Client, model::*, runner};
 #[derive(Parser)]
 #[command(name = "runspk-worker", version)]
 struct Args {
+    #[command(flatten)]
+    settings: runspk::config::SettingsArgs,
+    /// Advertise a worker capability (repeatable KEY=VALUE).
+    #[arg(long="label",env="RUNSPK_LABELS",value_delimiter=',',value_parser=runspk::model::parse_label)]
+    labels: Vec<(String, String)>,
     #[arg(long, env = "RUNSPK_URL")]
     url: Option<String>,
     #[arg(long, env = "RUNSPK_TOKEN", hide_env_values = true)]
@@ -12,10 +17,10 @@ struct Args {
     config: Option<std::path::PathBuf>,
     #[arg(env = "RUNSPK_WORKER_ID", long)]
     id: String,
-    #[arg(env = "RUNSPK_CPU", long, default_value_t = 1)]
-    cpu: u32,
-    #[arg(env = "RUNSPK_MEM_MIB", long, default_value_t = 256)]
-    mem_mib: u64,
+    #[arg(env = "RUNSPK_CPU", long)]
+    cpu: Option<u32>,
+    #[arg(env = "RUNSPK_MEM_MIB", long)]
+    mem_mib: Option<u64>,
     #[arg(env = "RUNSPK_ALLOW_NATIVE", long)]
     allow_native: bool,
     #[arg(env = "RUNSPK_DATA_DIR", long)]
@@ -35,6 +40,7 @@ async fn main() -> anyhow::Result<()> {
     }
     runspk::init_logging();
     let a = Args::parse();
+    let settings = a.settings.load()?;
     // SAFETY: geteuid has no pointer or lifetime preconditions.
     anyhow::ensure!(
         !a.allow_native || unsafe { libc::geteuid() } != 0,
@@ -60,19 +66,27 @@ async fn main() -> anyhow::Result<()> {
     if let Some(profile) = &profile {
         runspk::profile::private_dir(&profile.state()?)?;
     }
-    let client = Client::new(url, token)?;
+    let client = Client::new(url, token)?.with_limits(settings.transfers)?;
     let journal = std::sync::Arc::new(runspk::journal::Journal::open(&data_dir, &a.id)?);
     let r = Registration {
         auth: journal.auth.clone(),
         capacity: Resources {
-            cpu: a.cpu,
-            mem_mib: a.mem_mib,
+            cpu: a.cpu.unwrap_or(settings.worker.cpu),
+            mem_mib: a.mem_mib.unwrap_or(settings.worker.mem_mib),
         },
         physical: runner::physical_resources()?,
         allow_native: a.allow_native,
         runtime: a.runtime,
         gpus: runspk::hardware::select_gpus(&a.gpu_ids, a.simulate_gpus, &a.id)?,
         project_staging: true,
+        labels: settings
+            .worker
+            .labels
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .chain(a.labels)
+            .collect(),
+        transfer_limits: Some(settings.transfers),
     };
     let (tx, rx) = tokio::sync::watch::channel(false);
     let worker = runner::worker(client, r, journal, rx);

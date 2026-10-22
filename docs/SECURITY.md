@@ -25,3 +25,5 @@ Container names and ownership labels derive from attempt UUIDs, recorded before 
 References: [Docker resource limits](https://docs.docker.com/engine/containers/resource_constraints/), [run security flags](https://docs.docker.com/engine/containers/run/), [GPU visibility](https://docs.docker.com/engine/containers/gpu/). No automatic system-wide cgroup, driver, container-runtime or firewall configuration is performed.
 
 Project transfer limits, no-overwrite extraction, per-attempt ownership and recovery are documented in [WORKSPACES.md](WORKSPACES.md). Native code and authenticated workers remain trusted; a shared token cannot provide confidentiality between team members.
+
+Scheduler URLs reject embedded credentials, queries and fragments; bearer credentials stay in private profiles/environment. HTTP error bodies redact the active bearer token before CLI/TUI diagnostics. Snapshot deserialization enforces the hard file-count ceiling before constructing an arbitrarily large file list. The monitor sanitizes control sequences in all rendered API text. Host telemetry is an authenticated worker observation for display only, not a resource accounting authority.

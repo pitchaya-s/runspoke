@@ -1,5 +1,7 @@
 #[path = "runspk/display.rs"]
 mod display;
+#[path = "runspk/monitor.rs"]
+mod monitor;
 #[path = "runspk/setup.rs"]
 mod setup;
 #[path = "runspk/submit.rs"]
@@ -22,6 +24,8 @@ Project: runspk run --project . --output results --trusted -- python3 main.py
 Terminal output is human-readable; pipes retain JSON. Use --json or --human explicitly."
 )]
 struct Args {
+    #[command(flatten)]
+    settings: runspk::config::SettingsArgs,
     #[arg(long, env = "RUNSPK_URL", global = true)]
     url: Option<String>,
     #[arg(long, env = "RUNSPK_TOKEN", hide_env_values = true, global = true)]
@@ -55,6 +59,22 @@ enum Action {
     Join(setup::JoinArgs),
     /// Check configuration, installed companion binaries and scheduler connectivity.
     Doctor,
+    /// Show validated, effective preferences (never prints tokens).
+    Config {
+        #[arg(long)]
+        remote: bool,
+    },
+    /// Interactive cluster monitor (requires a terminal).
+    Monitor {
+        #[arg(long,value_parser=clap::value_parser!(u64).range(1..=60))]
+        refresh: Option<u64>,
+    },
+    /// Submit a new job using an immutable completed job specification and snapshot.
+    Repeat {
+        id: String,
+        #[arg(long)]
+        key: Option<String>,
+    },
     /// Generate completions; does not modify your shell configuration.
     Completions {
         #[arg(value_enum)]
@@ -94,8 +114,8 @@ enum Action {
     },
     /// Back up a local scheduler database while it is running (no API token needed).
     Backup {
-        #[arg(long, default_value = ".runspk/scheduler.sqlite")]
-        db: std::path::PathBuf,
+        #[arg(long)]
+        db: Option<std::path::PathBuf>,
         #[arg(long)]
         out: std::path::PathBuf,
     },
@@ -103,7 +123,14 @@ enum Action {
     Fetch {
         id: String,
         #[arg(long)]
-        into: PathBuf,
+        #[arg(required_unless_present = "list")]
+        into: Option<PathBuf>,
+        /// List captured output files and sizes without downloading their contents.
+        #[arg(long, conflicts_with = "into")]
+        list: bool,
+        /// Retrieve one relative file/directory prefix.
+        #[arg(long)]
+        path: Option<String>,
         /// Attempt UUID from `runspk attempts JOB_ID`; omit for the latest result.
         #[arg(long)]
         attempt: Option<String>,
@@ -111,6 +138,8 @@ enum Action {
     /// Show worker health and reserved/total CPU, RAM and GPU resources.
     Workers,
     Stats,
+    /// Inspect retained snapshots, artifacts, logs, receipts and database/WAL allocation.
+    Storage,
     Hardware,
     Attempts {
         id: String,
@@ -130,6 +159,16 @@ enum Action {
         id: String,
         #[arg(long)]
         follow: bool,
+        /// Start within the last N retained UTF-8 bytes of each stream (prefix retention).
+        #[arg(long)]
+        tail: Option<usize>,
+        #[arg(long)]
+        stdout_offset: Option<usize>,
+        #[arg(long)]
+        stderr_offset: Option<usize>,
+        /// Emit bounded byte-cursor JSON chunks; ordinary --json logs stays compatible.
+        #[arg(long)]
+        incremental: bool,
     },
 }
 
@@ -199,6 +238,7 @@ async fn run() -> anyhow::Result<i32> {
         );
         return Ok(0);
     }
+    let settings = a.settings.load()?;
     if matches!(&a.command,Action::Submit(spec) | Action::Run{spec,..} if spec.dry_run) {
         let spec = match a.command {
             Action::Submit(spec) | Action::Run { spec, .. } => spec,
@@ -206,7 +246,7 @@ async fn run() -> anyhow::Result<i32> {
         };
         println!(
             "{}",
-            serde_json::to_string_pretty(&spec.prepare().await?.manifest()?)?
+            serde_json::to_string_pretty(&spec.prepare(&settings).await?.manifest()?)?
         );
         return Ok(0);
     }
@@ -220,12 +260,32 @@ async fn run() -> anyhow::Result<i32> {
         return Ok(0);
     }
     if let Action::Backup { db, out } = a.command {
+        let db = match db {
+            Some(db) => db,
+            None => {
+                let path = profile::config_path(a.config.clone())?;
+                Profile::load(&path)?
+                    .map(|p| p.state().map(|state| state.join("scheduler.sqlite")))
+                    .transpose()?
+                    .unwrap_or_else(|| ".runspk/scheduler.sqlite".into())
+            }
+        };
         let displayed = out.clone();
         tokio::task::spawn_blocking(move || runspk::store::backup_database(&db, &out)).await??;
         println!("{}", serde_json::json!({"backup":displayed}));
         return Ok(0);
     }
     let config_path = profile::config_path(a.config)?;
+    if matches!(a.command, Action::Config { remote: false }) {
+        let saved = Profile::load(&config_path)?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &serde_json::json!({"settings":settings,"connection_profile":config_path,"url":a.url.or_else(||saved.map(|p|p.url)),"precedence":"CLI > RUNSPK_* environment > settings.json > defaults"})
+            )?
+        );
+        return Ok(0);
+    }
     if let Action::Init { state_dir } = a.command {
         let value = setup::init(&config_path, a.url, state_dir)?;
         if a.json {
@@ -244,7 +304,7 @@ async fn run() -> anyhow::Result<i32> {
         return Ok(0);
     }
     if let Action::Join(args) = a.command {
-        setup::join(&config_path, args)?;
+        setup::join(&config_path, args, &a.settings)?;
         return Ok(0);
     }
     if matches!(a.command, Action::Doctor) {
@@ -273,7 +333,7 @@ async fn run() -> anyhow::Result<i32> {
         state_dir: saved.and_then(|p| p.state_dir),
     };
     if let Action::Start(args) = a.command {
-        setup::start(&connection, args)?;
+        setup::start(&connection, args, &a.settings)?;
         return Ok(0);
     }
     if let Action::Invite { out } = a.command {
@@ -298,8 +358,42 @@ On the worker: runspk join {} --id NAME --cpu 1 --mem 256M --allow-native",
         }
         return Ok(0);
     }
-    let c = Client::new(url, token)?;
+    let c = Client::new(url, token)?.with_limits(settings.transfers)?;
     let value = match a.command {
+        Action::Config { remote: true } => {
+            let remote: serde_json::Value = c.get("/info").await?;
+            let limits = c.negotiated_limits().await?;
+            serde_json::json!({"settings":settings,"scheduler":remote,"effective_transfers":limits})
+        }
+        Action::Config { remote: false } => unreachable!(),
+        Action::Monitor { refresh } => {
+            anyhow::ensure!(
+                !a.json && !a.human,
+                "monitor is interactive; omit --json/--human and use list/workers for scripts"
+            );
+            monitor::run(c, refresh.unwrap_or(settings.monitor_refresh_secs)).await?;
+            return Ok(0);
+        }
+        Action::Repeat { id, key } => {
+            let previous: Job = c.get(&format!("/jobs/{id}")).await?;
+            anyhow::ensure!(
+                previous.state.terminal(),
+                "repeat requires a completed job; it never reconciles an uncertain execution"
+            );
+            let mut spec = previous.spec;
+            spec.submission_key = key;
+            let info = c.info().await?;
+            anyhow::ensure!(
+                spec.required_labels.is_empty() || info.supports("worker-labels-v1"),
+                "upgrade scheduler before repeating a job with worker requirements"
+            );
+            let j: Job = c.post("/jobs", &spec).await?;
+            if !a.json {
+                println!("{}", j.id);
+                return Ok(0);
+            }
+            serde_json::to_value(j)?
+        }
         Action::Init { .. }
         | Action::Join(_)
         | Action::Doctor
@@ -307,7 +401,7 @@ On the worker: runspk join {} --id NAME --cpu 1 --mem 256M --allow-native",
         | Action::Invite { .. }
         | Action::Completions { .. } => unreachable!(),
         Action::Submit(args) => {
-            let j = submit(&c, args).await?;
+            let j = submit(&c, args, &settings).await?;
             if !a.json {
                 println!("{}", j.id);
                 return Ok(0);
@@ -315,7 +409,7 @@ On the worker: runspk join {} --id NAME --cpu 1 --mem 256M --allow-native",
             serde_json::to_value(j)?
         }
         Action::Run { spec, wait_timeout } => {
-            let j = submit(&c, spec).await?;
+            let j = submit(&c, spec, &settings).await?;
             if a.json {
                 println!("{}", serde_json::json!({"event":"submitted","job":j}));
             } else {
@@ -365,38 +459,137 @@ On the worker: runspk join {} --id NAME --cpu 1 --mem 256M --allow-native",
             c.post::<Job>(&format!("/jobs/{id}/resolve"), &assume_stopped)
                 .await?,
         )?,
-        Action::Fetch { id, into, attempt } => {
+        Action::Fetch {
+            id,
+            into,
+            attempt,
+            list,
+            path,
+        } => {
             anyhow::ensure!(
                 attempt
                     .as_ref()
                     .is_none_or(|attempt| uuid::Uuid::parse_str(attempt).is_ok()),
                 "--attempt needs an attempt UUID; run runspk attempts {id}, or omit --attempt for the latest result"
             );
-            let query = attempt
-                .map(|attempt| format!("?attempt={attempt}"))
-                .unwrap_or_default();
-            let artifacts: runspk::workspace::Artifacts = c
-                .get_with_timeout(
-                    &format!("/jobs/{id}/artifacts{query}"),
-                    runspk::client::TRANSFER_TIMEOUT,
-                )
-                .await?;
-            let target = into.clone();
-            let attempt_id = artifacts.attempt_id.clone();
-            tokio::task::spawn_blocking(move || {
-                runspk::workspace::materialize(&artifacts.bundle, &target)
-            })
-            .await??;
-            serde_json::json!({"job_id":id,"attempt_id":attempt_id,"directory":into})
+            if let Some(path) = &path {
+                runspk::workspace::validate_path(path)?;
+            }
+            let info = c.info().await?;
+            anyhow::ensure!(
+                (!list && path.is_none()) || info.supports("artifact-selection-v1"),
+                "scheduler needs an upgrade for output listing/selection"
+            );
+            let mut query = reqwest::Url::parse("http://localhost/")?;
+            {
+                let mut pairs = query.query_pairs_mut();
+                if let Some(attempt) = attempt {
+                    pairs.append_pair("attempt", &attempt);
+                }
+                if let Some(path) = path {
+                    pairs.append_pair("path", &path);
+                }
+                if list {
+                    pairs.append_pair("manifest", "true");
+                }
+            }
+            let endpoint = format!("/jobs/{id}/artifacts?{}", query.query().unwrap_or_default());
+            if list {
+                c.get_with_timeout::<serde_json::Value>(&endpoint, c.transfer_timeout())
+                    .await?
+            } else {
+                let artifacts: runspk::workspace::Artifacts =
+                    c.get_with_timeout(&endpoint, c.transfer_timeout()).await?;
+                let target = into.ok_or_else(|| anyhow::anyhow!("--into is required"))?;
+                let displayed = target.clone();
+                let attempt_id = artifacts.attempt_id.clone();
+                let limits = settings.transfers;
+                tokio::task::spawn_blocking(move || {
+                    if let Some(expected) = artifacts.fingerprint {
+                        anyhow::ensure!(
+                            artifacts
+                                .bundle
+                                .id_with(runspk::config::TransferLimits::hard())?
+                                == expected,
+                            "artifact fingerprint mismatch; no files extracted"
+                        );
+                    }
+                    runspk::workspace::materialize_with(&artifacts.bundle, &target, limits, true)
+                })
+                .await??;
+                serde_json::json!({"job_id":id,"attempt_id":attempt_id,"directory":displayed})
+            }
         }
         Action::Workers => serde_json::to_value(c.get::<Vec<Worker>>("/workers").await?)?,
         Action::Stats => c.get::<serde_json::Value>("/stats").await?,
+        Action::Storage => c.get::<serde_json::Value>("/storage").await?,
         Action::Hardware => unreachable!(),
         Action::Status { id } => serde_json::to_value(c.get::<Job>(&format!("/jobs/{id}")).await?)?,
         Action::Cancel { id } => {
             serde_json::to_value(c.post::<Job>(&format!("/jobs/{id}/cancel"), &()).await?)?
         }
-        Action::Logs { id, follow } => {
+        Action::Logs {
+            id,
+            follow,
+            tail,
+            stdout_offset,
+            stderr_offset,
+            incremental,
+        } => {
+            let info = if follow {
+                wait_read::<runspk::client::ServerInfo>(&c, "/info").await?
+            } else {
+                c.info().await?
+            };
+            let feature = info.supports("log-offsets-v1");
+            let explicit =
+                tail.is_some() || stdout_offset.is_some() || stderr_offset.is_some() || incremental;
+            anyhow::ensure!(
+                !explicit || feature,
+                "scheduler needs an upgrade for log cursors/tail"
+            );
+            if feature && (!a.json || explicit) {
+                let mut cursor = runspk::store::LogQuery {
+                    tail,
+                    stdout_offset: stdout_offset.unwrap_or(0),
+                    stderr_offset: stderr_offset.unwrap_or(0),
+                    ..Default::default()
+                };
+                loop {
+                    let job: Job = if follow {
+                        wait_read(&c, &format!("/jobs/{id}")).await?
+                    } else {
+                        c.get(&format!("/jobs/{id}")).await?
+                    };
+                    let terminal = job.state.terminal();
+                    let chunk: runspk::store::LogChunk = if follow {
+                        wait_query(&c, &format!("/jobs/{id}/logs/chunk"), &cursor).await?
+                    } else {
+                        c.get_query(&format!("/jobs/{id}/logs/chunk"), &cursor)
+                            .await?
+                    };
+                    let drained = chunk.stdout_next == chunk.stdout_total
+                        && chunk.stderr_next == chunk.stderr_total;
+                    if a.json {
+                        println!("{}", serde_json::to_string(&chunk)?);
+                    } else {
+                        write_chunk(&chunk)?;
+                    }
+                    cursor = runspk::store::LogQuery {
+                        stdout_offset: chunk.stdout_next,
+                        stderr_offset: chunk.stderr_next,
+                        attempt_id: chunk.attempt_id,
+                        ..Default::default()
+                    };
+                    if drained {
+                        if !follow || terminal {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                }
+                return Ok(0);
+            }
             let mut lengths = (0, 0);
             let mut attempt = None;
             loop {
@@ -467,9 +660,32 @@ async fn follow_job(
 ) -> anyhow::Result<i32> {
     let mut lengths = (0, 0);
     let mut attempt = None;
+    let chunks = stream
+        && !json
+        && wait_read::<runspk::client::ServerInfo>(client, "/info")
+            .await?
+            .supports("log-offsets-v1");
+    let mut cursor = runspk::store::LogQuery::default();
     loop {
         let job: Job = wait_read(client, &format!("/jobs/{id}")).await?;
-        if stream {
+        if chunks {
+            loop {
+                let chunk: runspk::store::LogChunk =
+                    wait_query(client, &format!("/jobs/{id}/logs/chunk"), &cursor).await?;
+                write_chunk(&chunk)?;
+                let drained = chunk.stdout_next == chunk.stdout_total
+                    && chunk.stderr_next == chunk.stderr_total;
+                cursor = runspk::store::LogQuery {
+                    stdout_offset: chunk.stdout_next,
+                    stderr_offset: chunk.stderr_next,
+                    attempt_id: chunk.attempt_id,
+                    ..Default::default()
+                };
+                if drained {
+                    break;
+                }
+            }
+        } else if stream {
             let logs: Logs = wait_read(client, &format!("/jobs/{id}/logs")).await?;
             if logs.attempt_id != attempt {
                 lengths = (0, 0);
@@ -524,9 +740,37 @@ async fn wait_read<T: serde::de::DeserializeOwned>(
             Err(error)
                 if error
                     .downcast_ref::<reqwest::Error>()
-                    .is_some_and(|e| e.is_connect() || e.is_timeout()) =>
+                    .is_some_and(|e| e.is_connect() || e.is_timeout() || e.is_body()) =>
             {
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn write_chunk(chunk: &runspk::store::LogChunk) -> anyhow::Result<()> {
+    std::io::stdout().write_all(chunk.stdout.as_bytes())?;
+    std::io::stderr().write_all(chunk.stderr.as_bytes())?;
+    std::io::stdout().flush()?;
+    std::io::stderr().flush()?;
+    Ok(())
+}
+
+async fn wait_query<T: serde::de::DeserializeOwned>(
+    client: &Client,
+    path: &str,
+    query: &impl serde::Serialize,
+) -> anyhow::Result<T> {
+    loop {
+        match client.get_query(path, query).await {
+            Ok(value) => return Ok(value),
+            Err(error)
+                if error
+                    .downcast_ref::<reqwest::Error>()
+                    .is_some_and(|e| e.is_connect() || e.is_timeout() || e.is_body()) =>
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await
             }
             Err(error) => return Err(error),
         }

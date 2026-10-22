@@ -1,0 +1,14 @@
+{
+  "transfers": {
+    "project_bytes": "32MiB",
+    "artifact_bytes": "32MiB",
+    "max_files": 2048,
+    "max_entries": 4096,
+    "max_depth": 32,
+    "http_body_bytes": "64MiB",
+    "timeout_secs": 120
+  },
+  "monitor_refresh_secs": 2,
+  "job_defaults": {"cpu": 1, "mem_mib": 256, "timeout_secs": 3600},
+  "worker": {"cpu": 1, "mem_mib": 256, "labels": {}}
+}

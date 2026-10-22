@@ -47,6 +47,8 @@ fn main() {
                             session: uuid::Uuid::new_v4().to_string(),
                         };
                         s.register(Registration {
+                            labels: Default::default(),
+                            transfer_limits: None,
                             auth: auth.clone(),
                             capacity: Resources {
                                 cpu: 1,

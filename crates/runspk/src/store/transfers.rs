@@ -11,11 +11,13 @@ impl Store {
             })
             .optional()?;
         let bundle: Bundle = serde_json::from_slice(&data.context("workspace not found")?)?;
-        ensure!(bundle.id()? == id, "stored workspace fingerprint mismatch");
+        ensure!(
+            bundle.id_with(crate::config::TransferLimits::hard())? == id,
+            "stored workspace fingerprint mismatch"
+        );
         Ok(bundle)
     }
     pub fn save_artifacts(&mut self, upload: ArtifactUpload) -> Result<()> {
-        upload.bundle.validate()?;
         let attempt = self.owned(&upload.owner)?;
         ensure!(
             attempt.started_ms.is_some(),
@@ -34,6 +36,17 @@ impl Store {
             return Err(CompletionPruned.into());
         }
         let job = self.get(&attempt.job_id)?;
+        upload
+            .bundle
+            .validate_with(job.spec.transfer_limits.unwrap_or_default(), true)?;
+        crate::workspace::check_encoded_size(
+            &upload,
+            job.spec
+                .transfer_limits
+                .unwrap_or_default()
+                .http_body_bytes
+                .0,
+        )?;
         ensure!(job.spec.workspace_id.is_some(), "job has no staged project");
         ensure!(
             upload
@@ -89,6 +102,7 @@ impl Store {
             .optional()?;
         Ok(Artifacts {
             attempt_id: attempt.into(),
+            fingerprint: None,
             bundle: serde_json::from_slice(&data.context(
                 "outputs not found; declare --output with --project and inspect job errors",
             )?)?,

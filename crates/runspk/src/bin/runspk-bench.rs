@@ -80,7 +80,11 @@ struct Trace {
 }
 fn worker(id: &str, cpu: u32, mem: u64, gpu: u32) -> Worker {
     Worker {
+        telemetry: None,
+        telemetry_received_ms: None,
         registration: Registration {
+            labels: Default::default(),
+            transfer_limits: None,
             auth: WorkerAuth {
                 id: id.into(),
                 session: "simulation".into(),
@@ -156,6 +160,10 @@ fn generate(scenario: &str, seed: u64, n: u32) -> Workload {
             id: format!("{scenario}-{i}"),
             seq: i as i64,
             spec: JobSpec {
+                name: None,
+                tags: Vec::new(),
+                required_labels: Default::default(),
+                transfer_limits: None,
                 command: vec!["simulation".into()],
                 resources: Resources { cpu, mem_mib: mem },
                 timeout_secs: duration.div_ceil(1000),

@@ -71,6 +71,10 @@ async fn two_workers_reserve_independently_and_complete() {
             .post(
                 "/jobs",
                 &JobSpec {
+                    name: None,
+                    tags: Vec::new(),
+                    required_labels: Default::default(),
+                    transfer_limits: None,
                     command: vec!["/bin/sleep".into(), "0.3".into()],
                     resources: Resources {
                         cpu: 1,

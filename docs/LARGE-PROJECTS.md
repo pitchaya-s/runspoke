@@ -56,9 +56,7 @@ A reusable specification can contain the worker paths without transferring data:
 Save it next to `experiment.py`, then use `runspk submit --spec FILE`. The `project`
 path is relative to the specification file. Review `run --spec FILE --dry-run`
 before submission. A missing interpreter/data path is a workload failure: use
-`status`, `logs` and `attempts`, provision the missing path, then resubmit. There
-is no worker-label selection; provision required paths on all eligible workers,
-or use a dedicated scheduler pool. GPU identity affinity only selects GPUs.
+`status`, `logs` and `attempts`, provision the missing path, then resubmit. Advertise versioned capabilities with `runspk-worker --label dataset=measurements-v1 --label environment=experiment-v1`; add `--require dataset=measurements-v1 --require environment=experiment-v1` to submission. All required labels must match. Labels are administrator assertions, not automatic dependency verification; incorrect labels still lead to workload failures. GPU identity affinity independently selects GPUs.
 
 ## Rust builds
 
@@ -76,8 +74,8 @@ runspk run --project . --output results --cpu 2 --mem 2G --timeout 1800 --truste
 The worker's service PATH must contain Cargo (or use its absolute path). Build
 tools, caches and toolchain versions are externally managed. Concurrent Cargo
 builds serialize on the shared target directory lock; use separate cache paths
-for independent projects. Use a fresh results directory and an executable under
-32 MiB, or keep a large result on the worker and retrieve it explicitly over SSH.
+for independent projects. Use a fresh results directory and an executable within
+your configured artifact limit, or keep a large result on the worker and retrieve it explicitly over SSH.
 If sources exceed the snapshot bounds, provision an exact revision on workers
 and use `--cwd /absolute/checkout -- cargo build --locked --offline`; this mode
 does not provide immutable code capture or `fetch`.
@@ -95,3 +93,5 @@ Restricted containers remain an alternative for preloaded, reproducible images:
 they have no host mounts or network and do not support project snapshots or
 `fetch`. This release does not add a container volume/secret interface or
 unbounded blob storage.
+
+For modestly larger bundles configure project and artifact budgets together on the client, scheduler and eligible workers; see [CONFIGURATION](CONFIGURATION.md). GiB datasets and checkpoints still use explicit external storage.

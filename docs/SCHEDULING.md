@@ -18,3 +18,20 @@ Configured capacity is an administrator's budget within discovered physical CPU/
 First fit is simple but can strand large jobs after placing a small job on a large host. Best fit can preserve those hosts, but its two-resource score is a heuristic. Strict queue order can leave holes; EASY trades planning overhead and reliance on runtime bounds for opportunities to fill them. Priority changes fairness and can increase the wait of lower-priority jobs until aging catches up. No policy is claimed universally fastest.
 
 Polling does not invoke the planner when there are no queued jobs or every online worker has exhausted CPU/RAM. An existing assignment is returned by indexed lookup. Other planning passes still read and order the live queue; policy candidates borrow job records and only active/newly placed jobs occupy the planning reservation set. No mutable queue cache changes retry deadlines, priority aging or recovery behavior. When benchmarking, measure Store/policy costs separately from actual execution throughput.
+
+## Worker capabilities
+
+Workers advertise bounded key/value labels through repeated `--label KEY=VALUE`,
+`RUNSPK_LABELS`, or settings `worker.labels`. Jobs specify an exact conjunction
+through repeated `--require KEY=VALUE` or JSON `required_labels`. For example,
+`dataset=measurements-v1` and `python=3.12` select provisioned data and environments.
+Every policy checks these requirements in immediate placements and future EASY
+reservations. A worker missing a required label is incompatible, even if it has
+spare resources. Labels do not reserve resources or verify software installations.
+There are no soft preferences in this version.
+
+Project jobs also require the worker's advertised transfer envelope. Legacy
+registrations without labels/limits remain eligible only for compatible default
+jobs. `runspk explain ID` reports mismatched labels, insufficient transfer limits,
+backend/capacity/GPU issues, retry backoff and the job's submission-order queue
+position. That position is explicitly separate from priority/backfill order.

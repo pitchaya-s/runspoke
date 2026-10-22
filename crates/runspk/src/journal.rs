@@ -33,14 +33,14 @@ pub struct Entry {
     pub keep_workspace: bool,
 }
 
-fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
+fn atomic_write(path: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> Result<()> {
     let temp = path.with_extension("tmp");
     let mut file = OpenOptions::new()
         .create(true)
         .truncate(true)
         .write(true)
         .open(&temp)?;
-    file.write_all(data)?;
+    write(&mut file)?;
     file.sync_all()?;
     std::fs::rename(temp, path)?;
     File::open(path.parent().context("journal parent missing")?)?.sync_all()?;
@@ -81,7 +81,7 @@ impl Journal {
                     );
                 }
                 let s = uuid::Uuid::new_v4().to_string();
-                atomic_write(&path, s.as_bytes())?;
+                atomic_write(&path, |file| Ok(file.write_all(s.as_bytes())?))?;
                 s
             }
             Err(e) => return Err(e.into()),
@@ -118,24 +118,78 @@ impl Journal {
         uuid::Uuid::parse_str(&e.assignment.attempt_id)?;
         atomic_write(
             &self.dir.join(format!("{}.json", e.assignment.attempt_id)),
-            &serde_json::to_vec(e)?,
+            |file| {
+                let mut writer = std::io::BufWriter::new(file);
+                serde_json::to_writer(&mut writer, e)?;
+                writer.flush()?;
+                Ok(())
+            },
         )
+    }
+    /// Enumerate identities without loading all unacknowledged artifact blobs into memory.
+    pub async fn ids(self: &std::sync::Arc<Self>) -> Result<Vec<String>> {
+        self.blocking(Self::read_ids).await
+    }
+    fn read_ids(&self) -> Result<Vec<String>> {
+        let mut ids = Vec::new();
+        for item in std::fs::read_dir(&self.dir)? {
+            let path = item?.path();
+            if path.extension().is_some_and(|e| e == "json") {
+                let id = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .context("non-UTF8 execution journal name")?;
+                uuid::Uuid::parse_str(id).with_context(|| {
+                    format!(
+                        "invalid execution journal {}; preserve state before recovery",
+                        path.display()
+                    )
+                })?;
+                ids.push(id.to_owned());
+            }
+        }
+        ids.sort();
+        Ok(ids)
+    }
+    pub async fn entry(self: &std::sync::Arc<Self>, attempt: &str) -> Result<Option<Entry>> {
+        uuid::Uuid::parse_str(attempt)?;
+        let attempt = attempt.to_owned();
+        self.blocking(move |j| j.read_entry(&attempt)).await
+    }
+    fn read_entry(&self, attempt: &str) -> Result<Option<Entry>> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let path = self.dir.join(format!("{attempt}.json"));
+        let file = match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        // Covers the hard encoded transfer ceiling, logs, and bounded job metadata.
+        ensure!(
+            file.metadata()?.is_file() && file.metadata()?.len() <= 160 * 1024 * 1024,
+            "execution journal {} is not a bounded regular file; preserve state for recovery",
+            path.display()
+        );
+        let entry:Entry=serde_json::from_reader(std::io::BufReader::new(std::io::Read::take(file,160*1024*1024+1))).with_context(||format!("invalid execution journal {}; preserve state and restore from a trusted backup before recovery",path.display()))?;
+        ensure!(
+            entry.assignment.attempt_id == attempt,
+            "execution journal {} has a mismatched attempt identity; preserve state",
+            path.display()
+        );
+        Ok(Some(entry))
     }
     pub async fn entries(self: &std::sync::Arc<Self>) -> Result<Vec<Entry>> {
         self.blocking(Self::read_entries).await
     }
     fn read_entries(&self) -> Result<Vec<Entry>> {
         let mut entries = Vec::new();
-        for item in std::fs::read_dir(&self.dir)? {
-            let path = item?.path();
-            if path.extension().is_some_and(|e| e == "json") {
-                match std::fs::read(&path) {
-                    Ok(data) => entries.push(serde_json::from_slice(&data).with_context(|| {
-                        format!("invalid execution journal {}; preserve state and restore from a trusted backup before recovery", path.display())
-                    })?),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(e.into()),
-                }
+        for id in self.read_ids()? {
+            if let Some(entry) = self.read_entry(&id)? {
+                entries.push(entry);
             }
         }
         Ok(entries)
@@ -270,6 +324,62 @@ impl ProcessIdentity {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn identity_listing_streamed_roundtrip_and_tamper_rejection() {
+        let root = tempfile::tempdir().unwrap();
+        let journal = std::sync::Arc::new(Journal::open(root.path(), "bounded").unwrap());
+        let spec=serde_json::from_value(serde_json::json!({"command":["true"],"resources":{"cpu":1,"mem_mib":64},"timeout_secs":10,"trusted":true})).unwrap();
+        let job = crate::store::Store::open(":memory:")
+            .unwrap()
+            .submit(spec)
+            .unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let entry = Entry {
+            assignment: Assignment {
+                job,
+                attempt_id: id.clone(),
+            },
+            process: None,
+            completion: None,
+            runtime: None,
+            artifacts: Some(crate::workspace::Bundle::default()),
+            keep_workspace: false,
+        };
+        journal.save(&entry).await.unwrap();
+        assert_eq!(journal.ids().await.unwrap(), vec![id.clone()]);
+        assert_eq!(
+            journal
+                .entry(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .assignment
+                .attempt_id,
+            id
+        );
+        assert!(journal.entry("../escape").await.is_err());
+        let other = uuid::Uuid::new_v4().to_string();
+        std::fs::copy(
+            journal.dir.join(format!("{id}.json")),
+            journal.dir.join(format!("{other}.json")),
+        )
+        .unwrap();
+        // Scanning identities never deserializes every artifact; a selected entry still verifies ownership.
+        assert_eq!(journal.ids().await.unwrap().len(), 2);
+        assert!(
+            journal
+                .entry(&other)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("mismatched attempt identity")
+        );
+        assert!(journal.dir.join(format!("{other}.json")).exists());
+        std::fs::remove_file(journal.dir.join(format!("{other}.json"))).unwrap();
+        journal.remove(&id).await.unwrap();
+        assert!(journal.ids().await.unwrap().is_empty());
+        assert!(journal.entry(&id).await.unwrap().is_none());
+    }
     #[tokio::test(flavor = "current_thread")]
     async fn stalled_io_is_bounded_and_does_not_block_timers() {
         let dir = tempfile::tempdir().unwrap();
@@ -308,6 +418,8 @@ mod tests {
         let mut store = crate::store::Store::open(":memory:").unwrap();
         store
             .register(Registration {
+                labels: Default::default(),
+                transfer_limits: None,
                 auth: journal.auth.clone(),
                 capacity: Resources {
                     cpu: 1,

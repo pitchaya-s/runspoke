@@ -251,7 +251,7 @@ class PackageTest(unittest.TestCase):
             shutil.copy2(REPO / 'scripts' / script, root / 'scripts' / script)
         for directory in ['docs', 'examples']:
             shutil.copytree(REPO / directory, root / directory, dirs_exist_ok=True)
-        for name in ['LICENSE', 'README.md']:
+        for name in ['LICENSE', 'README.md', 'CHANGELOG.md']:
             shutil.copy2(REPO / name, root / name)
         for name in UNLISTED_FILES:
             path = root / name
@@ -285,7 +285,9 @@ class PackageTest(unittest.TestCase):
                 names = tar.getnames()
                 self.assertEqual(len(names), len(set(names)))
                 self.assertTrue(all(member.isfile() for member in tar))
-                for name in ['README.md', 'docs/QUICKSTART.md', 'docs/LARGE-PROJECTS.md', 'docs/MULTI-MACHINE.md',
+                for name in ['README.md', 'CHANGELOG.md', 'docs/QUICKSTART.md', 'docs/LARGE-PROJECTS.md', 'docs/MULTI-MACHINE.md',
+                             'docs/CONFIGURATION.md', 'docs/MONITORING.md', 'examples/settings.json',
+                             'examples/runspoke-monitor.png',
                              'examples/runspk-joined-worker.service', 'examples/runspk-tunnel.service',
                              'examples/python-project/.runspkignore']:
                     self.assertIn(name, names)

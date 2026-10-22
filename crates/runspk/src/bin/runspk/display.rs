@@ -7,7 +7,7 @@ pub(super) fn render(kind: &str, value: &Value) -> anyhow::Result<()> {
         "list" | "queue" => {
             let jobs: Vec<Job> = serde_json::from_value(value.clone())?;
             println!(
-                "{:<36} {:<11} {:>3} {:>8} {:>3} {:<14} COMMAND",
+                "{:<36} {:<11} {:>3} {:>8} {:>3} {:<14} NAME / COMMAND",
                 "JOB", "STATE", "CPU", "MiB", "GPU", "WORKER"
             );
             for job in &jobs {
@@ -19,7 +19,10 @@ pub(super) fn render(kind: &str, value: &Value) -> anyhow::Result<()> {
                     job.spec.resources.mem_mib,
                     job.spec.gpu,
                     job.worker_id.as_deref().unwrap_or("—"),
-                    job.spec.command.join(" ")
+                    job.spec.name.as_ref().map_or_else(
+                        || job.spec.command.join(" "),
+                        |name| format!("{name} · {}", job.spec.command.join(" "))
+                    )
                 );
             }
             if jobs.is_empty() {
@@ -62,6 +65,15 @@ pub(super) fn render(kind: &str, value: &Value) -> anyhow::Result<()> {
                 job.spec.gpu,
                 job.attempts
             );
+            if let Some(name) = &job.spec.name {
+                println!("Name      {name}");
+            }
+            if !job.spec.tags.is_empty() {
+                println!("Tags      {}", job.spec.tags.join(", "));
+            }
+            if !job.spec.required_labels.is_empty() {
+                println!("Requires  {:?}", job.spec.required_labels);
+            }
             if let Some(code) = job.exit_code {
                 println!("Exit code {code}");
             }
@@ -106,6 +118,21 @@ pub(super) fn render(kind: &str, value: &Value) -> anyhow::Result<()> {
                         "{}: {}",
                         w["worker_id"].as_str().unwrap_or("?"),
                         w["reason"].as_str().unwrap_or("unknown")
+                    );
+                }
+            }
+        }
+        "fetch" if value.get("files").is_some() => {
+            println!(
+                "Captured outputs (attempt {}):",
+                value["attempt_id"].as_str().unwrap_or("?")
+            );
+            if let Some(files) = value["files"].as_array() {
+                for file in files {
+                    println!(
+                        "{:>12} B  {}",
+                        file["bytes"],
+                        file["path"].as_str().unwrap_or("?")
                     );
                 }
             }

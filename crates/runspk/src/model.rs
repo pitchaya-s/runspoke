@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::BTreeMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -30,6 +33,14 @@ impl Resources {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JobSpec {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub required_labels: BTreeMap<String, String>,
+    #[serde(default)]
+    pub transfer_limits: Option<crate::config::TransferLimits>,
     pub command: Vec<String>,
     pub resources: Resources,
     pub timeout_secs: u64,
@@ -58,6 +69,20 @@ pub struct JobSpec {
 impl JobSpec {
     pub fn validate(&self) -> anyhow::Result<()> {
         self.resources.validate()?;
+        if let Some(name) = &self.name {
+            anyhow::ensure!(
+                valid_metadata(name, 256),
+                "job name must be 1..256 bytes without control characters"
+            );
+        }
+        anyhow::ensure!(
+            self.tags.len() <= 64 && self.tags.iter().all(|tag| valid_metadata(tag, 64)),
+            "at most 64 tags of 1..64 bytes without control characters are supported"
+        );
+        validate_labels(&self.required_labels)?;
+        if let Some(limits) = self.transfer_limits {
+            limits.validate()?;
+        }
         if let Some(id) = &self.workspace_id {
             anyhow::ensure!(
                 id.len() == 64
@@ -169,6 +194,12 @@ pub enum JobState {
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize, clap::Args)]
 pub struct JobFilter {
+    /// Case-insensitive substring of ID, name or command.
+    #[arg(long)]
+    pub search: Option<String>,
+    /// Exact job tag.
+    #[arg(long)]
+    pub tag: Option<String>,
     #[arg(long, value_enum)]
     pub state: Option<JobState>,
     #[arg(long)]
@@ -241,6 +272,13 @@ pub struct WorkerAuth {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Heartbeat {
+    #[serde(flatten)]
+    pub auth: WorkerAuth,
+    #[serde(default)]
+    pub telemetry: Option<crate::telemetry::HostTelemetry>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Registration {
     pub auth: WorkerAuth,
     pub capacity: Resources,
@@ -252,6 +290,50 @@ pub struct Registration {
     pub gpus: Vec<Gpu>,
     #[serde(default)]
     pub project_staging: bool,
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
+    #[serde(default)]
+    pub transfer_limits: Option<crate::config::TransferLimits>,
+}
+
+impl Registration {
+    pub fn validate_metadata(&self) -> anyhow::Result<()> {
+        validate_labels(&self.labels)?;
+        if let Some(limits) = self.transfer_limits {
+            limits.validate()?;
+        }
+        Ok(())
+    }
+}
+
+fn valid_metadata(value: &str, max_bytes: usize) -> bool {
+    !value.is_empty() && value.len() <= max_bytes && !value.chars().any(char::is_control)
+}
+
+pub fn validate_labels(labels: &BTreeMap<String, String>) -> anyhow::Result<()> {
+    anyhow::ensure!(labels.len() <= 64, "at most 64 labels are supported");
+    for (key, value) in labels {
+        anyhow::ensure!(
+            !key.is_empty()
+                && key.len() <= 64
+                && key
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"-_./".contains(&c)),
+            "label keys must be 1..64 ASCII letters, digits, dots, dashes, underscores or slashes"
+        );
+        anyhow::ensure!(
+            valid_metadata(value, 256),
+            "label values must be 1..256 bytes without control characters"
+        );
+    }
+    Ok(())
+}
+
+pub fn parse_label(input: &str) -> Result<(String, String), String> {
+    let (key, value) = input.split_once('=').ok_or("label must use KEY=VALUE")?;
+    let label = (key.to_string(), value.to_string());
+    validate_labels(&BTreeMap::from([label.clone()])).map_err(|error| error.to_string())?;
+    Ok(label)
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -262,6 +344,10 @@ pub enum WorkerState {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Worker {
+    #[serde(default)]
+    pub telemetry: Option<crate::telemetry::HostTelemetry>,
+    #[serde(default)]
+    pub telemetry_received_ms: Option<i64>,
     pub registration: Registration,
     pub state: WorkerState,
     pub last_seen_ms: i64,
@@ -369,6 +455,10 @@ mod tests {
     #[test]
     fn validates_trust_and_resources() {
         let mut s = JobSpec {
+            name: None,
+            tags: Vec::new(),
+            required_labels: BTreeMap::new(),
+            transfer_limits: None,
             command: vec!["true".into()],
             resources: Resources {
                 cpu: 1,

@@ -1,5 +1,7 @@
 mod backup;
 mod history;
+mod logs;
+pub use logs::{LogChunk, LogQuery};
 mod schema;
 mod transfers;
 pub use backup::backup_database;
@@ -19,6 +21,7 @@ use uuid::Uuid;
 pub struct Store {
     conn: Connection,
     pub policy: Policy,
+    pub transfer_limits: crate::config::TransferLimits,
     pub metrics: SchedulingMetrics,
     pub database_metrics: DatabaseMetrics,
     // Drop SQLite before releasing ownership of its state.
@@ -62,6 +65,7 @@ impl Store {
         let mut s = Self {
             conn,
             policy: Policy::Fifo,
+            transfer_limits: crate::config::TransferLimits::default(),
             metrics: SchedulingMetrics::default(),
             database_metrics: DatabaseMetrics::default(),
             _lock: lock,
@@ -104,7 +108,10 @@ impl Store {
         &mut self,
         mut request: crate::workspace::ProjectSubmission,
     ) -> Result<Job> {
-        let id = request.workspace.id()?;
+        // Identify a historical keyed retry before applying mutable admission defaults.
+        let id = request
+            .workspace
+            .id_with(crate::config::TransferLimits::hard())?;
         ensure!(
             request
                 .spec
@@ -118,23 +125,10 @@ impl Store {
     }
     fn submit_inner(
         &mut self,
-        spec: JobSpec,
+        mut spec: JobSpec,
         workspace: Option<crate::workspace::Bundle>,
     ) -> Result<Job> {
         spec.validate()?;
-        if workspace.is_none()
-            && let Some(id) = &spec.workspace_id
-        {
-            ensure!(
-                self.conn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM workspaces WHERE id=?1)",
-                    [id],
-                    |r| r.get::<_, bool>(0)
-                )?,
-                "workspace not found; submit with --project to upload its files"
-            );
-        }
-        let serialized = serde_json::to_string(&spec)?;
         if let Some(key) = &spec.submission_key {
             let old: Option<(String, String)> = self
                 .conn
@@ -146,12 +140,48 @@ impl Store {
                 .optional()?;
             if let Some((id, old_spec)) = old {
                 ensure!(
-                    serde_json::from_str::<JobSpec>(&old_spec)? == spec,
+                    {
+                        let mut old: JobSpec = serde_json::from_str(&old_spec)?;
+                        if spec.transfer_limits.is_none() {
+                            // A legacy caller never supplied an envelope; retain the historical one.
+                            old.transfer_limits = None;
+                        } else if old.workspace_id.is_some() && old.transfer_limits.is_none() {
+                            old.transfer_limits = Some(crate::config::TransferLimits::default());
+                        }
+                        old == spec
+                    },
                     "submission key reused with a different specification"
                 );
                 return self.get(&id);
             }
         }
+        if let Some(limits) = spec.transfer_limits {
+            ensure!(
+                self.transfer_limits.supports(&limits),
+                "requested transfer limits exceed scheduler limits; inspect runspk config --remote"
+            );
+        }
+        // Persist the negotiated envelope only when admitting a new submission.
+        if spec.workspace_id.is_some() && spec.transfer_limits.is_none() {
+            spec.transfer_limits = Some(
+                self.transfer_limits
+                    .intersect(crate::config::TransferLimits::default()),
+            );
+        }
+        if let Some(id) = &spec.workspace_id {
+            let limits = spec.transfer_limits.unwrap_or_default();
+            if let Some(workspace) = &workspace {
+                workspace.validate_with(limits, false)?;
+                crate::workspace::check_submission_size(
+                    &spec,
+                    workspace,
+                    limits.http_body_bytes.0,
+                )?;
+            } else {
+                self.workspace(id).with_context(||"workspace not found or invalid; submit with --project to upload its files")?.validate_with(limits,false)?;
+            }
+        }
+        let serialized = serde_json::to_string(&spec)?;
         let mut j = Job {
             id: Uuid::new_v4().to_string(),
             seq: 0,
@@ -574,6 +604,7 @@ impl Store {
         Ok(w)
     }
     pub fn register(&mut self, registration: Registration) -> Result<Worker> {
+        registration.validate_metadata()?;
         registration.capacity.validate()?;
         registration.physical.validate()?;
         let ids: std::collections::BTreeSet<_> = registration.gpus.iter().map(|g| &g.id).collect();
@@ -648,6 +679,8 @@ impl Store {
             }
         }
         let w = Worker {
+            telemetry: None,
+            telemetry_received_ms: None,
             registration,
             state: WorkerState::Online,
             last_seen_ms: now_ms(),
@@ -669,7 +702,7 @@ impl Store {
         }
         let jobs: i64 = counts.values().sum();
         Ok(
-            serde_json::json!({"schema_version":SCHEMA_VERSION,"policy":self.policy,"scheduling":self.metrics,"database":self.database_metrics,"jobs":jobs,"states":counts,"workers":self.workers()?,"measured_usage":"use benchmark workload/process telemetry; reservations are not measurements"}),
+            serde_json::json!({"schema_version":SCHEMA_VERSION,"policy":self.policy,"scheduling":self.metrics,"database":self.database_metrics,"jobs":jobs,"states":counts,"workers":self.workers()?,"measured_usage":"worker.telemetry is measured whole-host Linux CPU/RAM; reservations are separate; per-job RSS is not collected"}),
         )
     }
     pub fn heartbeat(&mut self, auth: &WorkerAuth, drain: bool) -> Result<Worker> {
@@ -683,6 +716,20 @@ impl Store {
         };
         self.save_worker(&w)?;
         Ok(w)
+    }
+    pub fn observed_heartbeat(&mut self, heartbeat: Heartbeat) -> Result<Worker> {
+        if let Some(telemetry) = &heartbeat.telemetry {
+            telemetry.validate()?;
+        }
+        let mut worker = self.heartbeat(&heartbeat.auth, false)?;
+        if worker.telemetry.as_ref().map(|t| t.sampled_ms)
+            != heartbeat.telemetry.as_ref().map(|t| t.sampled_ms)
+        {
+            worker.telemetry_received_ms = heartbeat.telemetry.as_ref().map(|_| now_ms());
+        }
+        worker.telemetry = heartbeat.telemetry;
+        self.save_worker(&worker)?;
+        Ok(worker)
     }
     pub fn workers(&self) -> Result<Vec<Worker>> {
         let mut stmt = self.conn.prepare("SELECT data FROM workers ORDER BY id")?;

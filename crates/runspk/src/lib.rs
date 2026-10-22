@@ -1,6 +1,7 @@
 pub mod api;
 pub mod backend;
 pub mod client;
+pub mod config;
 pub mod hardware;
 pub mod journal;
 pub mod model;
@@ -10,6 +11,7 @@ pub mod runner;
 mod staging;
 mod state_lock;
 pub mod store;
+pub mod telemetry;
 pub mod worker;
 pub mod workspace;
 

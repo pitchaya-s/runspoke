@@ -44,9 +44,9 @@ trap 'exit 143' TERM
 tar -tzf "$install_archive" > "$install_stage/members"
 while IFS= read -r member; do
     case "$member" in
-        runspk|runspk-scheduler|runspk-worker|runspk-bench|install.sh|LICENSE|README.md|RELEASE|SHA256SUMS) ;;
-        docs/ARCHITECTURE.md|docs/FAILURE-MODEL.md|docs/SCHEDULING.md|docs/DEPLOYMENT.md|docs/WORKFLOWS.md|docs/QUICKSTART.md|docs/GPU.md|docs/WORKSPACES.md|docs/SECURITY.md|docs/LARGE-PROJECTS.md|docs/MULTI-MACHINE.md) ;;
-        examples/runspk.service|examples/runspk-scheduler.service|examples/runspk-worker.service|examples/runspk-joined-worker.service|examples/runspk-tunnel.service|examples/single.env|examples/scheduler.env|examples/worker.env) ;;
+        runspk|runspk-scheduler|runspk-worker|runspk-bench|install.sh|LICENSE|README.md|CHANGELOG.md|RELEASE|SHA256SUMS) ;;
+        docs/ARCHITECTURE.md|docs/FAILURE-MODEL.md|docs/SCHEDULING.md|docs/DEPLOYMENT.md|docs/WORKFLOWS.md|docs/QUICKSTART.md|docs/GPU.md|docs/WORKSPACES.md|docs/SECURITY.md|docs/LARGE-PROJECTS.md|docs/MULTI-MACHINE.md|docs/CONFIGURATION.md|docs/MONITORING.md) ;;
+        examples/runspk.service|examples/runspk-scheduler.service|examples/runspk-worker.service|examples/runspk-joined-worker.service|examples/runspk-tunnel.service|examples/settings.json|examples/runspoke-monitor.png|examples/single.env|examples/scheduler.env|examples/worker.env) ;;
         examples/python-project/experiment.py|examples/python-project/measurements.csv|examples/python-project/runspk.json|examples/python-project/.runspkignore) ;;
         QUICKSTART.md|python-project/experiment.py|python-project/measurements.csv|python-project/runspk.json|python-project/.runspkignore) ;;
         *) fail "Unexpected archive entry: $member" ;;

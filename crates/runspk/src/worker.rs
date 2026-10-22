@@ -10,15 +10,18 @@ use anyhow::Result;
 use std::{sync::Arc, time::Duration};
 use tokio::{sync::watch, task::JoinSet};
 
-async fn recover(journal: &Arc<Journal>) -> Result<()> {
-    for mut entry in journal.entries().await? {
+async fn recover(client: &Client, journal: &Arc<Journal>) -> Result<()> {
+    for id in journal.ids().await? {
+        let Some(mut entry) = journal.entry(&id).await? else {
+            continue;
+        };
         if entry.completion.is_none() {
             if let Some(process) = &entry.process {
                 process.stop().await?;
             }
             crate::backend::cleanup(&entry).await?;
             let mut error = "worker restarted; prior process stopped".to_owned();
-            match crate::staging::collect(journal, &entry).await {
+            match crate::staging::collect(client, journal, &entry).await {
                 Ok(bundle) => entry.artifacts = bundle,
                 Err(e) => {
                     entry.keep_workspace = true;
@@ -44,6 +47,7 @@ pub async fn worker(
     journal: Arc<Journal>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
+    registration.validate_metadata()?;
     registration.capacity.validate()?;
     anyhow::ensure!(
         registration.capacity.fits(registration.physical),
@@ -59,7 +63,7 @@ pub async fn worker(
     );
     // Fence recorded processes before registration: a changed capacity must not
     // prevent the old session from reporting that its executions have stopped.
-    recover(&journal).await?;
+    recover(&client, &journal).await?;
     if let Some(runtime) = registration.runtime {
         crate::backend::check(runtime).await?;
     }
@@ -70,8 +74,10 @@ pub async fn worker(
     );
     let pool = &pool[..registration.capacity.cpu as usize];
     loop {
-        for entry in journal.entries().await? {
-            publish(&client, &journal, &entry).await?;
+        for id in journal.ids().await? {
+            if let Some(entry) = journal.entry(&id).await? {
+                publish(&client, &journal, &entry).await?;
+            }
         }
         match client
             .post::<Worker>("/worker/register", &registration)
@@ -84,18 +90,13 @@ pub async fn worker(
             }
         }
     }
+    let telemetry = crate::telemetry::subscribe();
     let runtime = registration.runtime;
     let auth = registration.auth;
     let mut tasks = JoinSet::new();
     let mut replay = JoinSet::new();
     let mut active = std::collections::BTreeMap::<String, Vec<usize>>::new();
-    let mut pending: std::collections::BTreeSet<_> = journal
-        .entries()
-        .await?
-        .into_iter()
-        .filter(|entry| entry.completion.is_some())
-        .map(|entry| entry.assignment.attempt_id)
-        .collect();
+    let mut pending: std::collections::BTreeSet<_> = journal.ids().await?.into_iter().collect();
     let mut maintenance = tokio::time::interval(Duration::from_secs(1));
     let mut last_replayed = None;
     maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -118,15 +119,15 @@ pub async fn worker(
             }
             _=maintenance.tick()=> {
                 // Active executions publish their own completion; replay owns only finished tasks.
-                if let Err(e) = client.post::<Worker>("/worker/heartbeat", &auth).await {
+                let heartbeat=Heartbeat{auth:auth.clone(),telemetry:telemetry.borrow().clone()};
+                if let Err(e) = client.post::<Worker>("/worker/heartbeat", &heartbeat).await {
                     tracing::debug!(error=%e,"heartbeat failed");
                 }
-                let mut entries = journal.entries().await?;
-                entries.retain(|entry| entry.completion.is_some() && !active.contains_key(&entry.assignment.attempt_id));
-                entries.sort_by(|a,b|a.assignment.attempt_id.cmp(&b.assignment.attempt_id));
+                let mut entries=journal.ids().await?;
+                entries.retain(|id|!active.contains_key(id));
                 pending.clear();
-                pending.extend(entries.iter().map(|entry|entry.assignment.attempt_id.clone()));
-                let offset = entries.partition_point(|entry| last_replayed.as_ref().is_some_and(|id| &entry.assignment.attempt_id <= id));
+                pending.extend(entries.iter().cloned());
+                let offset=entries.partition_point(|entry|last_replayed.as_ref().is_some_and(|id|entry<=id));
                 entries.rotate_left(offset);
                 if replay.is_empty() && !entries.is_empty() {
                     let client=client.clone();let journal=journal.clone();
@@ -134,9 +135,10 @@ pub async fn worker(
                     replay.spawn(async move {
                         let started=std::time::Instant::now();
                         let mut last=None;
-                        for entry in entries.into_iter().take(8) {
-                            last=Some(entry.assignment.attempt_id.clone());
-                            publish(&client,&journal,&entry).await?;
+                        for id in entries.into_iter().take(8) {
+                            let _artifact_permit=client.artifact_permit().await?;
+                            last=Some(id.clone());
+                            if let Some(entry)=journal.entry(&id).await? {publish(&client,&journal,&entry).await?;}
                             if started.elapsed()>=Duration::from_millis(200){break;}
                         }
                         Ok::<_,anyhow::Error>(last)

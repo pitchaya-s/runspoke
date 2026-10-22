@@ -60,10 +60,11 @@ pub async fn db<T: Send + 'static>(
 struct AuthState {
     token: String,
     transfers: Arc<Semaphore>,
+    limits: crate::config::TransferLimits,
 }
 async fn authorize(
     State(state): State<AuthState>,
-    request: Request<axum::body::Body>,
+    mut request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
     if request
@@ -80,51 +81,154 @@ async fn authorize(
         && matches!(path.as_str(), "/jobs/project" | "/worker/artifacts"))
         || (method == axum::http::Method::GET
             && (path.starts_with("/workspaces/") || path.ends_with("/artifacts")));
-    let _permit = if transfer {
-        Some(
-            state
-                .transfers
-                .acquire()
-                .await
-                .expect("transfer semaphore remains open"),
-        )
+    let permit = if transfer {
+        match state.transfers.clone().try_acquire_owned() {
+            Ok(permit) => Some(Arc::new(permit)),
+            Err(_) => return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(
+                    serde_json::json!({"error":"another bundle transfer is active; retry shortly"}),
+                ),
+            )
+                .into_response(),
+        }
     } else {
         None
     };
+    if let Some(permit) = &permit {
+        request.extensions_mut().insert(permit.clone());
+    }
     let started = std::time::Instant::now();
-    let response = next.run(request).await;
+    let deadline = tokio::time::Instant::now() + state.limits.timeout();
+    let response = match tokio::time::timeout(if transfer {state.limits.timeout()} else {std::time::Duration::from_secs(30)},next.run(request)).await {
+        Ok(response)=>response,
+        Err(_)=>return (StatusCode::REQUEST_TIMEOUT,Json(serde_json::json!({"error":"request timed out; check status before retrying a submission"}))).into_response(),
+    };
     tracing::debug!(%method,%path,status=response.status().as_u16(),elapsed_us=started.elapsed().as_micros(),"request completed");
-    response
+    if let Some(permit) = permit {
+        let (parts, body) = response.into_parts();
+        Response::from_parts(
+            parts,
+            axum::body::Body::new(TransferBody::new(body, permit, deadline)),
+        )
+    } else {
+        response
+    }
+}
+// Copy bounded frames: Bytes slices would pin the entire JSON allocation in a slow socket.
+struct TransferBody {
+    receiver: tokio::sync::mpsc::Receiver<Result<axum::body::Bytes, axum::Error>>,
+    remaining: Option<u64>,
+}
+impl TransferBody {
+    fn new(
+        mut body: axum::body::Body,
+        permit: Arc<tokio::sync::OwnedSemaphorePermit>,
+        deadline: tokio::time::Instant,
+    ) -> Self {
+        use axum::body::HttpBody;
+        let remaining = body.size_hint().exact();
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        tokio::spawn(async move {
+            let _permit = permit;
+            let produce = async {
+                while let Some(frame) =
+                    std::future::poll_fn(|cx| std::pin::Pin::new(&mut body).poll_frame(cx)).await
+                {
+                    match frame {
+                        Ok(frame) => {
+                            if let Ok(bytes) = frame.into_data() {
+                                for chunk in bytes.chunks(64 * 1024) {
+                                    if sender
+                                        .send(Ok(axum::body::Bytes::copy_from_slice(chunk)))
+                                        .await
+                                        .is_err()
+                                    {
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            let _ = sender.send(Err(error)).await;
+                            return;
+                        }
+                    }
+                }
+            };
+            if tokio::time::timeout_at(deadline, produce).await.is_err() {
+                // A full channel closes on drop; Content-Length exposes the incomplete transfer too.
+                let _ = sender.try_send(Err(axum::Error::new(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "transfer response deadline exceeded",
+                ))));
+            }
+        });
+        Self {
+            receiver,
+            remaining,
+        }
+    }
+}
+impl axum::body::HttpBody for TransferBody {
+    type Data = axum::body::Bytes;
+    type Error = axum::Error;
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        self.receiver.poll_recv(cx).map(|frame| {
+            frame.map(|result| {
+                result.map(|bytes| {
+                    self.remaining = self
+                        .remaining
+                        .map(|left| left.saturating_sub(bytes.len() as u64));
+                    http_body::Frame::data(bytes)
+                })
+            })
+        })
+    }
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.remaining.map_or_else(
+            http_body::SizeHint::default,
+            http_body::SizeHint::with_exact,
+        )
+    }
 }
 pub fn router(store: Shared, token: String) -> anyhow::Result<Router> {
     anyhow::ensure!(
         token.len() >= 32,
         "RUNSPK_TOKEN must contain at least 32 characters"
     );
+    let limits = store
+        .lock()
+        .map_err(|_| anyhow::anyhow!("store lock poisoned"))?
+        .transfer_limits;
+    limits.validate()?;
     Ok(Router::new()
         .route("/jobs", get(list).post(submit))
         .route(
             "/jobs/project",
-            post(submit_project)
-                .layer(DefaultBodyLimit::max(crate::workspace::MAX_HTTP_BODY_BYTES)),
+            post(submit_project).layer(DefaultBodyLimit::max(limits.http_body_bytes.0)),
         )
         .route("/workspaces/{id}", get(workspace))
         .route("/jobs/{id}/artifacts", get(artifacts))
         .route(
             "/worker/artifacts",
-            post(upload_artifacts)
-                .layer(DefaultBodyLimit::max(crate::workspace::MAX_HTTP_BODY_BYTES)),
+            post(upload_artifacts).layer(DefaultBodyLimit::max(crate::config::HARD_HTTP_BYTES)),
         )
         .route("/info", get(info))
         .route("/jobs/{id}", get(status))
         .route("/jobs/{id}/cancel", post(cancel))
         .route("/jobs/{id}/logs", get(logs))
+        .route("/jobs/{id}/logs/chunk", get(log_chunk))
         .route("/jobs/{id}/attempts", get(attempts))
         .route("/jobs/{id}/resolve", post(resolve))
         .route("/jobs/{id}/explain", get(explain))
         .route("/history/prune", post(prune))
         .route("/workers", get(workers))
         .route("/stats", get(stats))
+        .route("/storage", get(storage))
         .route("/worker/register", post(register))
         .route("/worker/poll", post(poll))
         .route("/worker/heartbeat", post(heartbeat))
@@ -137,6 +241,7 @@ pub fn router(store: Shared, token: String) -> anyhow::Result<Router> {
             AuthState {
                 token,
                 transfers: Arc::new(Semaphore::new(1)),
+                limits,
             },
             authorize,
         )))
@@ -144,41 +249,82 @@ pub fn router(store: Shared, token: String) -> anyhow::Result<Router> {
 async fn submit(State(s): State<Shared>, Json(spec): Json<JobSpec>) -> ApiResult<Job> {
     Ok(Json(db(s, move |s| s.submit(spec)).await?))
 }
-async fn info() -> Json<serde_json::Value> {
-    Json(
-        serde_json::json!({"version":env!("CARGO_PKG_VERSION"),"schema_version":crate::store::SCHEMA_VERSION,"features":["project-snapshots-v1","artifacts-v1"],"snapshot_max_bytes":crate::workspace::MAX_BYTES}),
-    )
+async fn info(State(s): State<Shared>) -> ApiResult<serde_json::Value> {
+    Ok(Json(db(s,|s|Ok(serde_json::json!({"version":env!("CARGO_PKG_VERSION"),"schema_version":crate::store::SCHEMA_VERSION,"features":["project-snapshots-v1","artifacts-v1","transfer-limits-v1","worker-labels-v1","job-metadata-v1","log-offsets-v1","artifact-selection-v1","storage-usage-v1","host-telemetry-v1"],"snapshot_max_bytes":s.transfer_limits.project_bytes.0,"transfer_limits":s.transfer_limits}))).await?))
 }
 async fn submit_project(
     State(s): State<Shared>,
+    axum::Extension(permit): axum::Extension<Arc<tokio::sync::OwnedSemaphorePermit>>,
     Json(request): Json<crate::workspace::ProjectSubmission>,
 ) -> ApiResult<Job> {
-    Ok(Json(db(s, move |s| s.submit_project(request)).await?))
+    Ok(Json(
+        db(s, move |s| {
+            let _permit = permit;
+            s.submit_project(request)
+        })
+        .await?,
+    ))
 }
 async fn workspace(
     State(s): State<Shared>,
     Path(id): Path<String>,
+    axum::Extension(permit): axum::Extension<Arc<tokio::sync::OwnedSemaphorePermit>>,
 ) -> ApiResult<crate::workspace::Bundle> {
-    Ok(Json(db(s, move |s| s.workspace(&id)).await?))
+    Ok(Json(
+        db(s, move |s| {
+            let _permit = permit;
+            s.workspace(&id)
+        })
+        .await?,
+    ))
 }
 #[derive(serde::Deserialize)]
 struct ArtifactQuery {
     attempt: Option<String>,
+    path: Option<String>,
+    #[serde(default)]
+    manifest: bool,
+}
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+enum ArtifactResponse {
+    Manifest(serde_json::Value),
+    Bundle(crate::workspace::Artifacts),
 }
 async fn artifacts(
     State(s): State<Shared>,
     Path(id): Path<String>,
     Query(query): Query<ArtifactQuery>,
-) -> ApiResult<crate::workspace::Artifacts> {
-    Ok(Json(
-        db(s, move |s| s.artifacts(&id, query.attempt.as_deref())).await?,
-    ))
+    axum::Extension(permit): axum::Extension<Arc<tokio::sync::OwnedSemaphorePermit>>,
+) -> ApiResult<ArtifactResponse> {
+    Ok(Json(db(s,move |s| {
+        let _permit=permit;
+        if let Some(path)=&query.path {crate::workspace::validate_path(path)?;}
+        let mut artifacts=s.artifacts(&id,query.attempt.as_deref())?;
+        let limits=crate::config::TransferLimits::hard();
+        artifacts.bundle.validate_with(limits,true)?;
+        if let Some(path)=&query.path {
+            artifacts.bundle.files.retain(|f|f.path==*path || f.path.strip_prefix(path).is_some_and(|p|p.starts_with('/')));
+            anyhow::ensure!(!artifacts.bundle.files.is_empty(),"output path not found: {path}");
+        }
+        artifacts.fingerprint=Some(artifacts.bundle.id_with(limits)?);
+        if query.manifest {
+            Ok(ArtifactResponse::Manifest(serde_json::json!({"attempt_id":artifacts.attempt_id,"fingerprint":artifacts.fingerprint,"bytes":artifacts.bundle.validate_with(limits,true)?,"files":artifacts.bundle.files.iter().map(|f|serde_json::json!({"path":f.path,"bytes":base64::decoded_len_estimate(f.data.len()) - f.data.bytes().rev().take_while(|b|*b==b'=').count(),"executable":f.executable})).collect::<Vec<_>>()})))
+        } else {Ok(ArtifactResponse::Bundle(artifacts))}
+    }).await?))
 }
 async fn upload_artifacts(
     State(s): State<Shared>,
+    axum::Extension(permit): axum::Extension<Arc<tokio::sync::OwnedSemaphorePermit>>,
     Json(request): Json<crate::workspace::ArtifactUpload>,
 ) -> ApiResult<()> {
-    Ok(Json(db(s, move |s| s.save_artifacts(request)).await?))
+    Ok(Json(
+        db(s, move |s| {
+            let _permit = permit;
+            s.save_artifacts(request)
+        })
+        .await?,
+    ))
 }
 async fn list(State(s): State<Shared>, Query(filter): Query<JobFilter>) -> ApiResult<Vec<Job>> {
     Ok(Json(db(s, move |s| s.list_filtered(&filter)).await?))
@@ -215,8 +361,8 @@ async fn stats(State(s): State<Shared>) -> ApiResult<serde_json::Value> {
 async fn register(State(s): State<Shared>, Json(r): Json<Registration>) -> ApiResult<Worker> {
     Ok(Json(db(s, move |s| s.register(r)).await?))
 }
-async fn heartbeat(State(s): State<Shared>, Json(a): Json<WorkerAuth>) -> ApiResult<Worker> {
-    Ok(Json(db(s, move |s| s.heartbeat(&a, false)).await?))
+async fn heartbeat(State(s): State<Shared>, Json(a): Json<Heartbeat>) -> ApiResult<Worker> {
+    Ok(Json(db(s, move |s| s.observed_heartbeat(a)).await?))
 }
 async fn drain(State(s): State<Shared>, Json(a): Json<WorkerAuth>) -> ApiResult<Worker> {
     Ok(Json(db(s, move |s| s.heartbeat(&a, true)).await?))
@@ -244,4 +390,16 @@ async fn resolve(
         );
     }
     Ok(Json(db(s, move |s| s.resolve(&id)).await?))
+}
+
+async fn log_chunk(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Query(query): Query<crate::store::LogQuery>,
+) -> ApiResult<crate::store::LogChunk> {
+    Ok(Json(db(s, move |s| s.log_chunk(&id, &query)).await?))
+}
+
+async fn storage(State(s): State<Shared>) -> ApiResult<serde_json::Value> {
+    Ok(Json(db(s, |s| s.storage_usage()).await?))
 }

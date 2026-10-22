@@ -9,6 +9,11 @@ use std::{
 #[derive(Parser)]
 #[command(name = "runspk-scheduler", version)]
 struct Args {
+    #[command(flatten)]
+    settings: runspk::config::SettingsArgs,
+    /// Advertise a worker capability (repeatable KEY=VALUE).
+    #[arg(long="label",env="RUNSPK_LABELS",value_delimiter=',',value_parser=runspk::model::parse_label)]
+    labels: Vec<(String, String)>,
     #[arg(env = "RUNSPK_BIND", long, default_value = "127.0.0.1:8765")]
     bind: SocketAddr,
     #[arg(env = "RUNSPK_DB", long, default_value = ".runspk/scheduler.sqlite")]
@@ -17,10 +22,10 @@ struct Args {
     token: String,
     #[arg(long)]
     local: bool,
-    #[arg(env = "RUNSPK_CPU", long, default_value_t = 1)]
-    cpu: u32,
-    #[arg(env = "RUNSPK_MEM_MIB", long, default_value_t = 256)]
-    mem_mib: u64,
+    #[arg(env = "RUNSPK_CPU", long)]
+    cpu: Option<u32>,
+    #[arg(env = "RUNSPK_MEM_MIB", long)]
+    mem_mib: Option<u64>,
     #[arg(env = "RUNSPK_POLICY", long, value_enum, default_value = "fifo")]
     policy: runspk::policy::Policy,
     #[arg(env = "RUNSPK_RUNTIME", long, value_enum)]
@@ -38,6 +43,7 @@ async fn main() -> anyhow::Result<()> {
     }
     runspk::init_logging();
     let a = Args::parse();
+    let settings = a.settings.load()?;
     // SAFETY: geteuid has no pointer or lifetime preconditions.
     anyhow::ensure!(
         !a.local || unsafe { libc::geteuid() } != 0,
@@ -52,6 +58,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let mut store = Store::open(&a.db)?;
     store.policy = a.policy;
+    store.transfer_limits = settings.transfers;
     let store = Arc::new(Mutex::new(store));
     let router = api::router(store.clone(), a.token.clone())?;
     let listener = tokio::net::TcpListener::bind(a.bind).await?;
@@ -74,18 +81,27 @@ async fn main() -> anyhow::Result<()> {
             "local",
         )?);
         Some(tokio::spawn(runner::worker(
-            Client::new(format!("http://{}", listener.local_addr()?), a.token)?,
+            Client::new(format!("http://{}", listener.local_addr()?), a.token)?
+                .with_limits(settings.transfers)?,
             Registration {
                 auth: journal.auth.clone(),
                 capacity: Resources {
-                    cpu: a.cpu,
-                    mem_mib: a.mem_mib,
+                    cpu: a.cpu.unwrap_or(settings.worker.cpu),
+                    mem_mib: a.mem_mib.unwrap_or(settings.worker.mem_mib),
                 },
                 physical: runner::physical_resources()?,
                 allow_native: true,
                 runtime: a.runtime,
                 gpus: runspk::hardware::select_gpus(&a.gpu_ids, a.simulate_gpus, "local")?,
                 project_staging: true,
+                labels: settings
+                    .worker
+                    .labels
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .chain(a.labels)
+                    .collect(),
+                transfer_limits: Some(settings.transfers),
             },
             journal,
             rx,

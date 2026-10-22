@@ -21,14 +21,21 @@ pub(crate) async fn prepare(
     let path = journal.workspace_path(&entry.assignment.attempt_id)?;
     let destination = path.clone();
     let transfer = async {
+        let limits = entry
+            .assignment
+            .job
+            .spec
+            .transfer_limits
+            .unwrap_or_default();
+        ensure!(
+            client.limits.supports(&limits),
+            "worker transfer limits are too small for assigned project; upgrade worker settings"
+        );
         let bundle: Bundle = client
-            .get_with_timeout(
-                &format!("/workspaces/{id}"),
-                crate::client::TRANSFER_TIMEOUT,
-            )
+            .get_with_timeout(&format!("/workspaces/{id}"), client.transfer_timeout())
             .await?;
         ensure!(
-            bundle.id()? == *id,
+            bundle.id_with(limits)? == *id,
             "downloaded workspace fingerprint mismatch"
         );
         journal
@@ -37,7 +44,7 @@ pub(crate) async fn prepare(
                 std::fs::create_dir_all(workspaces)?;
                 std::fs::File::open(workspaces.parent().context("missing journal directory")?)?
                     .sync_all()?;
-                crate::workspace::materialize(&bundle, &destination)
+                crate::workspace::materialize_with(&bundle, &destination, limits, false)
             })
             .await
     };
@@ -64,7 +71,11 @@ pub(crate) async fn prepare(
     }
 }
 
-pub(crate) async fn collect(journal: &Arc<Journal>, entry: &Entry) -> Result<Option<Bundle>> {
+pub(crate) async fn collect(
+    _client: &Client,
+    journal: &Arc<Journal>,
+    entry: &Entry,
+) -> Result<Option<Bundle>> {
     if entry.assignment.job.spec.workspace_id.is_none()
         || entry.assignment.job.spec.outputs.is_empty()
         || entry.process.is_none()
@@ -73,8 +84,23 @@ pub(crate) async fn collect(journal: &Arc<Journal>, entry: &Entry) -> Result<Opt
     }
     let path = journal.workspace_path(&entry.assignment.attempt_id)?;
     let outputs = entry.assignment.job.spec.outputs.clone();
+    let limits = entry
+        .assignment
+        .job
+        .spec
+        .transfer_limits
+        .unwrap_or_default();
+    let owner = Start {
+        auth: journal.auth.clone(),
+        job_id: entry.assignment.job.id.clone(),
+        attempt_id: entry.assignment.attempt_id.clone(),
+    };
     journal
-        .blocking(move |_| crate::workspace::capture_outputs(&path, &outputs))
+        .blocking(move |_| {
+            let bundle = crate::workspace::capture_outputs_with(&path, &outputs, limits)?;
+            crate::workspace::check_artifact_size(&owner, &bundle, limits.http_body_bytes.0)?;
+            Ok(bundle)
+        })
         .await
         .map(Some)
 }

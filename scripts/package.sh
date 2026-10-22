@@ -40,10 +40,11 @@ for binary in runspk runspk-scheduler runspk-worker runspk-bench; do
 done
 install -m 755 scripts/install.sh "$package_stage/install.sh"
 package_files=(
-    LICENSE README.md
+    LICENSE README.md CHANGELOG.md
     docs/ARCHITECTURE.md docs/FAILURE-MODEL.md docs/SCHEDULING.md docs/DEPLOYMENT.md
     docs/WORKFLOWS.md docs/QUICKSTART.md docs/GPU.md docs/WORKSPACES.md docs/SECURITY.md
-    docs/LARGE-PROJECTS.md docs/MULTI-MACHINE.md
+    docs/LARGE-PROJECTS.md docs/MULTI-MACHINE.md docs/CONFIGURATION.md docs/MONITORING.md
+    examples/settings.json examples/runspoke-monitor.png
     examples/runspk.service examples/runspk-scheduler.service examples/runspk-worker.service
     examples/runspk-joined-worker.service examples/runspk-tunnel.service
     examples/single.env examples/scheduler.env examples/worker.env

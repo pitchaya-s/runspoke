@@ -9,6 +9,8 @@ fn spec() -> JobSpec {
 }
 fn registration() -> Registration {
     Registration {
+        labels: Default::default(),
+        transfer_limits: None,
         auth: WorkerAuth {
             id: "storage".into(),
             session: uuid::Uuid::new_v4().to_string(),
@@ -55,6 +57,8 @@ fn indexed_history_pagination_and_saturated_polls() {
         "saturated polling must not replan the queue"
     );
     let mut filter = JobFilter {
+        search: None,
+        tag: None,
         state: Some(JobState::Queued),
         limit: Some(37),
         ..Default::default()

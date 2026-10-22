@@ -93,6 +93,10 @@ impl TestCluster {
     }
     fn spec(&self, command: Vec<&str>) -> JobSpec {
         JobSpec {
+            name: None,
+            tags: Vec::new(),
+            required_labels: Default::default(),
+            transfer_limits: None,
             command: command.into_iter().map(str::to_string).collect(),
             resources: Resources {
                 cpu: 1,

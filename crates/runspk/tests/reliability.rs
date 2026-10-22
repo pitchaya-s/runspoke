@@ -6,6 +6,10 @@ use std::{
 };
 fn spec() -> JobSpec {
     JobSpec {
+        name: None,
+        tags: Vec::new(),
+        required_labels: Default::default(),
+        transfer_limits: None,
         command: vec!["/bin/sleep".into(), "10".into()],
         resources: Resources {
             cpu: 1,
@@ -27,6 +31,8 @@ fn spec() -> JobSpec {
 }
 fn registration() -> Registration {
     Registration {
+        labels: Default::default(),
+        transfer_limits: None,
         auth: WorkerAuth {
             id: "test".into(),
             session: uuid::Uuid::new_v4().to_string(),

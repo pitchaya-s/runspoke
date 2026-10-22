@@ -15,14 +15,16 @@ pub(super) struct StartArgs {
     /// Run only the scheduler; attach workers separately.
     #[arg(long)]
     pub scheduler_only: bool,
-    #[arg(long, default_value_t = 1)]
-    pub cpu: u32,
-    #[arg(long,default_value="256M",value_parser=super::parse_mem)]
-    pub mem: u64,
+    #[arg(long, env = "RUNSPK_CPU")]
+    pub cpu: Option<u32>,
+    #[arg(long,env="RUNSPK_MEM_MIB",value_parser=super::parse_mem)]
+    pub mem: Option<u64>,
     #[arg(long, value_delimiter = ',')]
     pub gpu_ids: Vec<String>,
     #[arg(long, default_value_t = 0)]
     pub simulate_gpus: u32,
+    #[arg(long="label",env="RUNSPK_LABELS",value_delimiter=',',value_parser=runspk::model::parse_label)]
+    pub labels: Vec<(String, String)>,
 }
 #[derive(Args)]
 pub(super) struct JoinArgs {
@@ -30,10 +32,10 @@ pub(super) struct JoinArgs {
     pub invitation: PathBuf,
     #[arg(long)]
     pub id: String,
-    #[arg(long, default_value_t = 1)]
-    pub cpu: u32,
-    #[arg(long,default_value="256M",value_parser=super::parse_mem)]
-    pub mem: u64,
+    #[arg(long, env = "RUNSPK_CPU")]
+    pub cpu: Option<u32>,
+    #[arg(long,env="RUNSPK_MEM_MIB",value_parser=super::parse_mem)]
+    pub mem: Option<u64>,
     /// Allow trusted jobs to run as your user on this machine.
     #[arg(long, required = true)]
     pub allow_native: bool,
@@ -41,6 +43,8 @@ pub(super) struct JoinArgs {
     pub gpu_ids: Vec<String>,
     #[arg(long, default_value_t = 0)]
     pub simulate_gpus: u32,
+    #[arg(long="label",env="RUNSPK_LABELS",value_delimiter=',',value_parser=runspk::model::parse_label)]
+    pub labels: Vec<(String, String)>,
 }
 pub(super) fn companion(name: &str) -> Result<PathBuf> {
     let path = std::env::current_exe()?
@@ -93,7 +97,12 @@ pub(super) fn init(
     Profile::local(url.unwrap_or_else(|| "http://127.0.0.1:8765".into()), state)?.save(path)?;
     Ok(serde_json::json!({"config":path,"created":true}))
 }
-pub(super) fn start(profile: &Profile, args: StartArgs) -> Result<()> {
+pub(super) fn start(
+    profile: &Profile,
+    args: StartArgs,
+    settings: &runspk::config::SettingsArgs,
+) -> Result<()> {
+    let defaults = settings.load()?.worker;
     let url = reqwest::Url::parse(&profile.url)?;
     ensure!(
         url.scheme() == "http" && url.path() == "/",
@@ -130,9 +139,9 @@ pub(super) fn start(profile: &Profile, args: StartArgs) -> Result<()> {
         command.args([
             "--local",
             "--cpu",
-            &args.cpu.to_string(),
+            &args.cpu.unwrap_or(defaults.cpu).to_string(),
             "--mem-mib",
-            &args.mem.to_string(),
+            &args.mem.unwrap_or(defaults.mem_mib).to_string(),
             "--simulate-gpus",
             &args.simulate_gpus.to_string(),
         ]);
@@ -145,9 +154,18 @@ pub(super) fn start(profile: &Profile, args: StartArgs) -> Result<()> {
         profile.url,
         state.display()
     );
+    for (key, value) in args.labels {
+        command.arg("--label").arg(format!("{key}={value}"));
+    }
+    settings.apply(&mut command)?;
     Err(command.exec()).context("start scheduler")
 }
-pub(super) fn join(path: &Path, args: JoinArgs) -> Result<()> {
+pub(super) fn join(
+    path: &Path,
+    args: JoinArgs,
+    settings: &runspk::config::SettingsArgs,
+) -> Result<()> {
+    let defaults = settings.load()?.worker;
     let invitation = Profile::load(&args.invitation)?
         .context("invitation not found; copy the private file from runspk invite")?;
     let profile = Profile {
@@ -173,9 +191,9 @@ pub(super) fn join(path: &Path, args: JoinArgs) -> Result<()> {
             "--id",
             &args.id,
             "--cpu",
-            &args.cpu.to_string(),
+            &args.cpu.unwrap_or(defaults.cpu).to_string(),
             "--mem-mib",
-            &args.mem.to_string(),
+            &args.mem.unwrap_or(defaults.mem_mib).to_string(),
             "--allow-native",
             "--simulate-gpus",
             &args.simulate_gpus.to_string(),
@@ -187,6 +205,10 @@ pub(super) fn join(path: &Path, args: JoinArgs) -> Result<()> {
         "runspk: joining {} as {}; keep this worker supervised",
         profile.url, args.id
     );
+    for (key, value) in args.labels {
+        command.arg("--label").arg(format!("{key}={value}"));
+    }
+    settings.apply(&mut command)?;
     Err(command.exec()).context("start worker")
 }
 pub(super) async fn doctor(
