@@ -14,7 +14,7 @@ With Rust 1.89 or newer, install the beta from [crates.io](https://crates.io/cra
 cargo install runspk --version 0.1.0-beta.2 --locked
 ```
 
-The explicit version selects this prerelease; Cargo skips prereleases unless you request one. This installs all four companion binaries. To build from a checkout, use `cargo install --locked --path crates/runspk --bins`. See the [changelog](CHANGELOG.md) for changes and upgrade notes.
+The explicit version selects this prerelease; Cargo skips prereleases unless you request one. This installs all four companion binaries. To build from a checkout, use `cargo install --locked --path crates/runspk --bins`. See the [changelog](https://github.com/pitchaya-s/runspoke/blob/main/CHANGELOG.md) for changes and upgrade notes.
 
 For Linux users without Rust, the prebuilt x86_64 archive includes all companion binaries. Download the archive and matching checksum from [GitHub Releases](https://github.com/pitchaya-s/runspoke/releases), then verify and install it:
 
@@ -65,9 +65,9 @@ cat fetched/results/summary.txt
 
 `submit` prints a durable job ID. You can disconnect after submission; the scheduler and worker keep running. `wait --timeout 60` limits how long the client waits, while `--timeout 60` on submission limits the job's wall time. Fetch writes into a new directory and will not overwrite existing files.
 
-Use `runspk monitor` for an interactive job/worker view, live logs, queue explanations, filtering, and confirmed cancellation. See [monitoring](docs/MONITORING.md) for keys and reconnect behavior.
+Use `runspk monitor` for an interactive job/worker view, live logs, queue explanations, filtering, and confirmed cancellation. See [monitoring](https://github.com/pitchaya-s/runspoke/blob/main/docs/MONITORING.md) for keys and reconnect behavior.
 
-![Runspoke terminal monitor showing a local demo cluster with running, queued, completed, and failed jobs](examples/runspoke-monitor.png)
+![Runspoke terminal monitor showing a local demo cluster with running, queued, completed, and failed jobs](https://raw.githubusercontent.com/pitchaya-s/runspoke/main/examples/runspoke-monitor.png)
 
 Use `runspk list`, `runspk queue`, `runspk workers`, `runspk explain JOB_ID`, and `runspk attempts JOB_ID` to inspect the queue and diagnose work. `runspk doctor --json` gives machine-readable diagnostics. Piped inspection output is JSON; `--json` and `--human` choose the format explicitly. Shell completions are printed by `runspk completions bash` (also supports zsh, fish, elvish, and PowerShell).
 
@@ -81,7 +81,7 @@ Invitations contain the administrative token. They grant administrative access a
 
 Small project snapshots transfer source files to a worker. Input and output bundles default to 32 MiB and 2,048 regular files, with configurable bounded limits; `.runspkignore` and `--exclude` let you leave out local files. `--dry-run` previews what would be sent. Inputs are immutable for an attempt, and declared outputs are captured after execution stops.
 
-Inspect limits with `runspk config --remote`; [configuration](docs/CONFIGURATION.md) explains shared settings, CLI/environment precedence, timeouts, and mixed-version behavior.
+Inspect limits with `runspk config --remote`; [configuration](https://github.com/pitchaya-s/runspoke/blob/main/docs/CONFIGURATION.md) explains shared settings, CLI/environment precedence, timeouts, and mixed-version behavior.
 
 Jobs support `--name NAME`, repeatable `--tag TAG` and hard worker requirements such as `--require dataset=v1`. Advertise those capabilities with `runspk start --label dataset=v1` or `runspk-worker --label dataset=v1`. Use `list --search TEXT --tag TAG`, `fetch JOB_ID --list`, selective `fetch JOB_ID --path results/summary.json --into new-results`, and `repeat JOB_ID --key NEW_KEY` to reuse a completed job’s immutable inputs. `runspk storage` reports retained blobs/logs and database allocation.
 
