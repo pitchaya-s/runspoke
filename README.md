@@ -8,13 +8,13 @@ Start with one Linux computer. Add workers when you need more capacity. Runspoke
 
 ## Install
 
-With a recent Rust toolchain, install the published beta from [crates.io](https://crates.io/crates/runspk):
+With Rust 1.89 or newer, install the beta from [crates.io](https://crates.io/crates/runspk):
 
 ```bash
-cargo install runspk --version 0.1.0-beta.1
+cargo install runspk --version 0.1.0-beta.2 --locked
 ```
 
-The explicit version selects the published beta.1; Cargo skips prereleases unless you request one. This checkout prepares **0.1.0-beta.2**, including the monitor and configuration additions described below. Build it with `cargo install --locked --path crates/runspk --bins` using Rust 1.89 or newer. See the [changelog](CHANGELOG.md) for changes and upgrade notes.
+The explicit version selects this prerelease; Cargo skips prereleases unless you request one. This installs all four companion binaries. To build from a checkout, use `cargo install --locked --path crates/runspk --bins`. See the [changelog](CHANGELOG.md) for changes and upgrade notes.
 
 For Linux users without Rust, the prebuilt x86_64 archive includes all companion binaries. Download the archive and matching checksum from [GitHub Releases](https://github.com/pitchaya-s/runspoke/releases), then verify and install it:
 
